@@ -1,26 +1,18 @@
-# CVOYA graph — Project instructions
+# CVOYA graph — project instructions
 
-Type-safe .NET library for graph data and graph databases, with LINQ querying, transactions, and optional Roslyn analyzers and serialization codegen. Neo4j and PostgreSQL + Apache AGE are the in-tree database providers. Apache 2.0 licensed. Targets **.NET 10** with **C# 14** (`LangVersion` is set in [Directory.Build.props](Directory.Build.props)).
+CVOYA graph is an Apache-2.0 type-safe .NET library for graph data and graph databases. It targets .NET 10/C# 14 and ships provider-neutral querying, Neo4j, PostgreSQL + Apache AGE, an in-memory reference provider, analyzers, serialization/code generation, and a provider compatibility suite.
 
-This file is the canonical instruction set for AI coding agents (Claude Code, Codex, Copilot, and others) and a good orientation for humans. Tool-specific configuration lives in `.claude/`, `.codex/`, and `.github/copilot-instructions.md`; see [docs/ai-agents.md](docs/ai-agents.md) for the map.
+Tool-specific configuration lives in `.claude/` and `.codex/`; [docs/ai-agents.md](docs/ai-agents.md) maps the surfaces.
 
-## Layout
+## Orientation
 
-```
-src/Graph/                          provider-neutral core: IGraph, INode, IRelationship, LINQ surface, attributes
-src/Graph.Neo4j/                    Neo4j provider: LINQ-to-Cypher, transactions, entity managers
-src/Graph.Age/                      PostgreSQL + Apache AGE provider
-src/Graph.InMemory/                 in-memory reference provider: LINQ-to-objects over the shared query model; test double
-src/Graph.Cypher/                   shared typed Cypher AST, validation, and rendering
-src/Graph.Analyzers/                Roslyn analyzers (CG001…) for consumer domain models
-src/Graph.Serialization/            runtime serialization representation (EntityInfo, schemas)
-src/Graph.Serialization.CodeGen/    incremental source generator for entity serializers
-src/Graph.CompatibilityTests/       packable provider contract suite (TCK): harness SPI, capability registry, guard
-tests/                              see "Build and test" — the projects differ in what they need
-examples/                           runnable usage examples
-docs/                               concept docs, developer/build docs
-scripts/                            release + container helper scripts
-```
+- `src/Graph`: provider-neutral model and LINQ surface.
+- `src/Graph.{Neo4j,Age,InMemory}`: in-tree providers.
+- `src/Graph.Cypher`: typed Cypher AST, validation, and rendering.
+- `src/Graph.Analyzers`: `CG###` Roslyn analyzers.
+- `src/Graph.Serialization*`: runtime representation and source generator.
+- `src/Graph.CompatibilityTests`: packable provider contract suite (TCK).
+- `tests/`, `examples/`, and `docs/`: verification, runnable examples, and canonical guidance.
 
 ## Build and test
 
@@ -30,61 +22,46 @@ dotnet build --configuration Debug
 ./scripts/run-tests.sh --configuration Debug --lane all --disable-diff-engine
 ```
 
-During iteration, narrow the runner with repeatable `--project <name-or-path>` selectors and optional repeatable `--filter <xUnit-query>` expressions. A project selector limits both the build and test pass; use `--no-build` to reuse a compatible existing build. Once the diff is stable, run the complete relevant lane once on the final patch.
+Use repeatable `--project` and `--filter` selectors while iterating, then run the complete relevant lane on the stable diff. Run local Neo4j and AGE lanes serially because their suites mutate shared provider state.
 
-Run local Neo4j and AGE lanes serially. Their provider suites create, mutate, and clean database state and are not documented as isolated from concurrent local runs, even when the services themselves are separate.
+The fast lane covers service-free core, analyzer, Cypher, translation, serialization/codegen, in-memory, and TCK meta-tests. The full lane also requires:
 
-The runner discovers test projects under `tests/`, separates service-free and provider-backed lanes, and rejects projects that report zero tests. The full lane needs both Neo4j and AGE; use configured services, the repository container scripts, or the runner's `--neo4j --age` options.
+- Neo4j at `NEO4J_URI` or `bolt://localhost:7687` with `neo4j/password`; start it with `scripts/containers/start-neo4j.sh`.
+- AGE at `AGE_CONNECTION_STRING`; start it with `scripts/containers/start-age.sh`.
 
-Validation topology is fail-closed. When a PR adds, moves, or removes a project or changes build, test, package, or release control-plane files, update solution membership, runner classification, release partitioning, and CI path scopes in that same PR. Do not add a second hosted-CI test-project inventory: the required CI job consumes the discovering runner. Explicit release inventories are permitted where job partitioning requires them, but `ruby eng/ci/validation-inventory.test.rb` must continue to prove that they are complete and that representative future paths select the intended gates.
+`src/Graph.CompatibilityTests` defines contracts but executes almost no tests by itself; provider projects bind and run them. Benchmarks are outside the normal gate. See [provider implementers](docs/provider-implementers-guide.md) for the capability and certification model.
 
-The test projects have different requirements — get this right:
+Validation is fail-closed. A project or build/test/package/release control-plane change updates solution membership, runner classification, release partitioning, and CI path scopes together. `ruby eng/ci/validation-inventory.test.rb` must continue to prove inventory completeness.
 
-| Project | What it is | Needs |
-|---------|------------|-------|
-| `src/Graph.CompatibilityTests` | **Provider contract suite (TCK), packed as `Cvoya.Graph.CompatibilityTests`.** Test interfaces with default xUnit methods, a harness SPI (`IGraphProviderTestHarness`), and a capability registry; providers bind those interfaces in their own test project. It executes ~no tests standalone. Add provider-agnostic tests here so every provider inherits them. See [docs/provider-implementers-guide.md](docs/provider-implementers-guide.md#certifying-a-provider). | nothing (but running it alone proves nothing) |
-| `tests/Graph.Neo4j.Tests` | The contract suite bound to Neo4j + provider-specific tests. This is where the suite actually runs. | a running Neo4j at `NEO4J_URI`, or reachable at the default `bolt://localhost:7687` with `neo4j/password`. Start one with `scripts/containers/start-neo4j.sh` (Podman preferred locally; Docker fallback; set `CONTAINER_RUNTIME=podman` or `CONTAINER_RUNTIME=docker` to force one). There is **no** automatic container startup — `CI=true` does nothing (that path is disabled; see #88). |
-| `tests/Graph.Age.Tests` | The contract suite bound to Apache AGE + provider-specific tests. | a running AGE instance at `AGE_CONNECTION_STRING`. Start one with `scripts/containers/start-age.sh` and export the connection string it prints (default host port `5455`). |
-| `tests/Graph.InMemory.Tests` | The contract suite bound to the in-memory provider. Full-text search runs against the provider's index-free whole-token matcher. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.CompatibilityTests.Tests` | Meta-tests for the TCK itself (harness SPI lifecycle, capability skips, the compliance guard). | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.Analyzers.Tests` | Analyzer tests. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.Core.Tests` | Provider-neutral graph model, query-shape, and serialization integration tests. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.Cypher.Tests` | Shared Cypher AST, validation, and rendering tests. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.Neo4j.Translation.Tests` | LINQ-to-Cypher translation tests that do not execute against Neo4j. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.QuerySurface.CompilationTests` | Compile-time query-surface contract tests. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.Serialization.CodeGen.Tests` | Incremental serialization generator tests. | nothing — runs anywhere; the fast no-Docker lane |
-| `tests/Graph.Performance.Tests` | Benchmarks. | not part of the normal gate |
-
-Package testing before publishing: `dotnet msbuild eng/PackageValidation.proj -target:Validate`. The orchestrator packs the complete LocalFeed set, verifies its inventory and assembly version metadata with `scripts/verify-package-set.sh`, and restores/builds package references using repository-scoped NuGet state. Untagged builds use `VERSION` as their development default; published releases are tag-authoritative and override it. See [docs/release-process.md](docs/release-process.md).
+Run `dotnet msbuild eng/PackageValidation.proj -target:Validate` only for package/public-assembly changes; see [release process](docs/release-process.md).
 
 ## Conventions
 
-- C#/.NET conventions per [CONTRIBUTING.md](CONTRIBUTING.md); match the style of surrounding code, don't reformat.
-- One public type per file; XML documentation on all new public APIs.
-- Apache 2.0 copyright header on new source files, matching `.editorconfig`: `// Copyright CVOYA LLC. Licensed under the Apache License, Version 2.0.` followed by `// See LICENSE in the project root for full license terms.`
-- Conventional commit messages: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`.
-- Async: public async APIs take a `CancellationToken` and have an `Async` suffix.
-- Analyzer diagnostics use the `CG###` series. Check `src/Graph.Analyzers/AnalyzerReleases.*.md` before allocating an unused ID; suppress a diagnostic via `.editorconfig` or `#pragma warning disable CG###`.
-- Keep changes minimal and focused; prefer editing existing files; file follow-up issues instead of expanding scope.
+- Follow [CONTRIBUTING.md](CONTRIBUTING.md), match surrounding style, and avoid unrelated reformatting.
+- Put one public type per file and XML documentation on new public APIs.
+- New source files use the repository Apache-2.0 header from `.editorconfig`.
+- Public async APIs take `CancellationToken` and end in `Async`.
+- Analyzer IDs use `CG###`; inspect `src/Graph.Analyzers/AnalyzerReleases.*.md` before allocating one. Suppress diagnostics explicitly through `.editorconfig` or a targeted pragma.
+- Use conventional commit prefixes: `feat`, `fix`, `refactor`, `test`, `docs`, or `chore`.
 
-## Multi-agent workflow
+## Workflow
 
-- **The lead session owns isolation.** Task agents are dispatched into an already-prepared worktree/branch — verify with `git status` / `git branch --show-current` before changing anything, and never work in the user's main checkout. (Worktrees live under `~/dev/worktrees/graph/<task>`, based on latest `origin/main`.)
-- One focused branch + PR per task (`feat/…`, `fix/…`, `chore/…`); coordinate through branch state and PR comments, not shared files.
-- Run the relevant test lane before pushing (fast lane at minimum; include the Neo4j/AGE lanes when provider behavior changes). Docs-only changes may skip the test lane. The Release build + `dotnet format` gate is enforced mechanically instead of by instruction: `eng/install-hooks.sh`, run once per clone, points `core.hooksPath` at `.githooks/`, and every linked worktree inherits it — do not re-run it per worktree, and reserve `git push --no-verify` for emergencies.
-- Local CodeQL is not required: hosted CI runs CodeQL on every pull request and merge-queue candidate. `./scripts/run-codeql.sh` (or `./scripts/validate-build.sh --codeql`) remains available as an opt-in check for security-sensitive changes — default portable mode; `--build-mode manual` depends on local compiler-tracing support. It snapshots the tree when it starts, so run it on the final diff.
-- Hosted CI validates pull requests and merge-queue candidates, not the resulting `main` push. Its required path restores and builds once, then runs the provider and library suites against shared Neo4j and Apache AGE services; keep new tests in that consolidated path rather than adding another build job.
-- **Shared-file discipline:** `cvoya-graph.sln`, `Directory.Build.props`, `Directory.Packages.props`, `nuget.config`, `VERSION`, and `.github/` workflows are high-conflict and/or protected — change them additively, and ask the user before modifying the protected ones (a PreToolUse hook enforces this for Claude and Codex; it is advisory, not a security boundary).
-- **All changes land via pull request** (branch protection enforces this); use standard `git`/`gh`. You may see commits and PRs authored by `savasp-agent[bot]` — that is the maintainer's own automation identity, not a tool contributors need or can use.
+- Work only in a prepared task worktree under `~/dev/worktrees/graph/<task>`, based on current `origin/main`; never edit the main checkout.
+- One branch and PR owns one coherent outcome. Absorb small same-outcome gaps inside the owned surface and verification boundary; natively wire separate follow-ups.
+- Install `eng/install-hooks.sh` once per clone. Linked worktrees inherit the pre-push hook, which runs the change-scoped Release build and format gate. Run the relevant test lane yourself; do not repeat the full static gate manually unless diagnosing it.
+- Hosted CI owns the full provider matrix and CodeQL. Local CodeQL is opt-in for security-sensitive work, not a routine pre-push check.
+- Treat `cvoya-graph.sln`, `Directory.Build.props`, `Directory.Packages.props`, `nuget.config`, `VERSION`, and workflows as high-conflict/protected. Make minimal additive edits and honor the repository guard.
+- Rebase on current `origin/main` before pushing and merging. All changes land through a squash-merged PR.
 
-## Issue tracking
+PRs reference their issues and repeat the closing keyword per issue. Use native sub-issue/blocked-by relationships for dependencies, native issue types for category, milestones for release groups, and labels only for orthogonal attributes.
 
-- **Native relationships over prose:** dependencies use GitHub's sub-issue / blocked-by links, not "blocked by #N" in text. Umbrella issues (e.g. #90) group work via sub-issues.
-- **Issue types** carry category: `Bug`, `Feature`, or `Task`. Use labels only for triage and area attributes such as `documentation`, `ci`, `security`, `release`, `code-quality`, `testing`, `architecture`, and `agents`; milestones are used only for release-bounded groups.
-- PRs reference their issue; repeat the closing keyword per issue: `Closes #64, closes #65` (comma-separated bare numbers silently don't close).
-- Follow-ups become issues, not TODO comments or scope creep.
+## Documentation
 
-## Documentation discipline
+Ship documentation with behavior and public API changes. Keep samples compilable, grep docs when changing a public API, and update:
 
-- Ship doc updates with the code that changes behavior (`docs/`, XML docs, README).
-- Code samples in docs must compile against the current API — if you change a public API, grep the docs for it.
+- [querying](docs/querying.md) for query operators or semantics;
+- [provider implementers](docs/provider-implementers-guide.md) for provider contracts/capabilities;
+- [migration guide](docs/migration-0.x.md) for breaking changes;
+- [release process](docs/release-process.md) for packaging or publication.
+
+New public APIs also receive XML docs.

@@ -11,3 +11,8 @@ local-nuget-feed/
 .vs/
 *.user
 *.suo
+
+# Agent-managed worktrees live under ~/dev/worktrees, never in the repository.
+.claude/worktrees/
+.codex/worktrees/
+.worktrees/
