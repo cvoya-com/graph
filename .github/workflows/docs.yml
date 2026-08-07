@@ -160,7 +160,7 @@ jobs:
     - name: 🏗️ Setup Ruby
       uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
       with:
-        ruby-version: '3.2'
+        ruby-version: '3.3'
         bundler-cache: true
 
     - name: ✅ Validate Documentation Sources and Examples
@@ -199,7 +199,7 @@ jobs:
     - name: 🔗 Validate Internal Links
       # DocFX validates its own output with warnings-as-errors above. HTMLProofer
       # checks the Jekyll-owned tree while still resolving links into /api/.
-      run: bundle exec htmlproofer --disable-external=true --assume-extension=.html --ignore-files='/\/api\//' --swap-urls='^/graph/:/' _site
+      run: bundle exec htmlproofer --disable-external --assume-extension=.html --ignore-files='/\/api\//' --swap-urls='^/graph/:/' _site
 
     # Keep the metadata deterministic: a retry for the same immutable tag and
     # commit produces the same values, with no run ID, timestamp, or attempt ID.
