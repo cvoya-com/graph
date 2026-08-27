@@ -18,16 +18,16 @@
         <PackageVersion Include="Cvoya.Graph.Neo4j" Version="$(Version)" />
         <PackageVersion Include="Cvoya.Graph.Serialization" Version="$(Version)" />
         <PackageVersion Include="Cvoya.Graph.Serialization.CodeGen" Version="$(Version)" />
-        <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="5.6.0" />
-        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+        <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="5.9.0" />
+        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Analyzer.Testing.XUnit" Version="1.1.2" />
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.CodeFix.Testing.XUnit" Version="1.1.2" />
-        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
+        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.9.0" />
         <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.10" />
-        <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.10" />
-        <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.10" />
-        <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.301" />
-        <PackageVersion Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.9.0" />
+        <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+        <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+        <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.400" />
+        <PackageVersion Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.10.0" />
         <PackageVersion Include="Konnektr.Npgsql.Age" Version="2.0.0" />
         <PackageVersion Include="Neo4j.Driver" Version="6.3.0" />
         <PackageVersion Include="Npgsql" Version="10.0.3" />
@@ -42,13 +42,13 @@
         <PackageVersion Include="Serilog.Sinks.Console" Version="6.1.1" />
         <PackageVersion Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0" />
         <PackageVersion Include="Serilog.Sinks.Seq" Version="9.1.0" />
-        <PackageVersion Include="Testcontainers.Neo4j" Version="4.13.0" />
+        <PackageVersion Include="Testcontainers.Neo4j" Version="4.14.0" />
         <PackageVersion Include="Verify.XunitV3" Version="31.28.0" />
-        <PackageVersion Include="xunit.v3.mtp-v2" Version="3.2.2" />
+        <PackageVersion Include="xunit.v3.mtp-v2" Version="4.0.0" />
         <!-- Narrow (non-MTP) xunit.v3 components for the shipped compatibility-test package:
              attributes + TestContext + ITraitAttribute (extensibility.core) and Assert (assert),
              so external consumers are not transitively pinned to Microsoft.Testing.Platform. -->
-        <PackageVersion Include="xunit.v3.assert" Version="3.2.2" />
-        <PackageVersion Include="xunit.v3.extensibility.core" Version="3.2.2" />
+        <PackageVersion Include="xunit.v3.assert" Version="4.0.0" />
+        <PackageVersion Include="xunit.v3.extensibility.core" Version="4.0.0" />
     </ItemGroup>
 </Project>
