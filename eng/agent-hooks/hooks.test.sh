@@ -11,7 +11,7 @@ bash eng/agent-hooks/context-budget.test.sh || exit 1
 pass=0 fail=0
 check() { # description expected_exit json script
   local desc="$1" expected="$2" json="$3" script="$4"
-  printf '%s' "$json" | bash "$script" >/dev/null 2>&1
+  printf '%s\n' "$json" | bash "$script" >/dev/null 2>&1
   local actual=$?
   if [ "$actual" -eq "$expected" ]; then
     pass=$((pass+1)); echo "PASS: $desc"

@@ -42,7 +42,7 @@
         <PackageVersion Include="Serilog.Sinks.Console" Version="6.1.1" />
         <PackageVersion Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0" />
         <PackageVersion Include="Serilog.Sinks.Seq" Version="9.1.0" />
-        <PackageVersion Include="Testcontainers.Neo4j" Version="4.13.0" />
+        <PackageVersion Include="Testcontainers.Neo4j" Version="4.14.0" />
         <PackageVersion Include="Verify.XunitV3" Version="31.28.0" />
         <PackageVersion Include="xunit.v3.mtp-v2" Version="4.0.0" />
         <!-- Narrow (non-MTP) xunit.v3 components for the shipped compatibility-test package:
