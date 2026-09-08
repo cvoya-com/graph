@@ -23,17 +23,17 @@
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Analyzer.Testing.XUnit" Version="1.1.2" />
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.CodeFix.Testing.XUnit" Version="1.1.2" />
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.9.0" />
-        <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.10" />
+        <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.11" />
         <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.11" />
         <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
         <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.400" />
-        <PackageVersion Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.10.0" />
+        <PackageVersion Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.11.0" />
         <PackageVersion Include="Konnektr.Npgsql.Age" Version="2.0.0" />
         <PackageVersion Include="Neo4j.Driver" Version="6.3.0" />
         <PackageVersion Include="Npgsql" Version="10.0.3" />
-        <PackageVersion Include="OpenTelemetry" Version="1.17.0" />
-        <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.17.0" />
-        <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
+        <PackageVersion Include="OpenTelemetry" Version="1.18.0" />
+        <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.18.0" />
+        <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.18.0" />
         <PackageVersion Include="Serilog" Version="4.4.0" />
         <PackageVersion Include="Serilog.Enrichers.Process" Version="3.0.0" />
         <PackageVersion Include="Serilog.Enrichers.Thread" Version="4.0.0" />
@@ -42,8 +42,8 @@
         <PackageVersion Include="Serilog.Sinks.Console" Version="6.1.1" />
         <PackageVersion Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0" />
         <PackageVersion Include="Serilog.Sinks.Seq" Version="9.1.0" />
-        <PackageVersion Include="Testcontainers.Neo4j" Version="4.14.0" />
-        <PackageVersion Include="Verify.XunitV3" Version="31.28.0" />
+        <PackageVersion Include="Testcontainers.Neo4j" Version="4.15.0" />
+        <PackageVersion Include="Verify.XunitV3" Version="32.0.0" />
         <PackageVersion Include="xunit.v3.mtp-v2" Version="4.0.0" />
         <!-- Narrow (non-MTP) xunit.v3 components for the shipped compatibility-test package:
              attributes + TestContext + ITraitAttribute (extensibility.core) and Assert (assert),
