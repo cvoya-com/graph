@@ -88,6 +88,10 @@
         <GenerateDocumentationFile>false</GenerateDocumentationFile>
         <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
         <IsPackable>false</IsPackable>
+        <!-- Verify 33+ SponsorCheck (SC021): claim the open-source maintenance-fee exemption.
+             The exemption is time-bounded (at most 12 months out); renew it before it lapses. -->
+        <Verify_SponsorshipExemption>OpenSource</Verify_SponsorshipExemption>
+        <Verify_SponsorshipExemptionUntil>2027-10</Verify_SponsorshipExemptionUntil>
     </PropertyGroup>
 
     <!-- Example project settings -->
