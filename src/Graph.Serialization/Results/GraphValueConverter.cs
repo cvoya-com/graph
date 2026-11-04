@@ -2,6 +2,7 @@
 // See LICENSE in the project root for full license terms.
 
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
 
@@ -11,6 +12,11 @@ internal static class GraphValueConverter
 {
     internal const string MetadataPropertyName = "__metadata__";
     private const string TypeNameKey = "type";
+
+    // Successful metadata resolutions are stable for the life of the process: a Type that
+    // Type.GetType already resolved cannot become a different Type after another assembly loads.
+    // Cache only successes so an unresolved name can still resolve after a later assembly load.
+    private static readonly ConcurrentDictionary<string, Type> ResolvedMetadataTypes = new(StringComparer.Ordinal);
 
     public static object? ConvertTo(object? value, Type targetType)
     {
@@ -172,7 +178,53 @@ internal static class GraphValueConverter
             _ => null,
         };
 
-        return typeName is null ? null : Type.GetType(typeName);
+        return ResolveTypeName(typeName);
+    }
+
+    /// <summary>
+    /// Resolves the metadata type directly from the wire entries so materialization does not have
+    /// to convert the whole property bag (including every scalar and collection) just to read it.
+    /// </summary>
+    public static Type? GetTypeFromMetadata(IReadOnlyDictionary<string, GraphValue>? entries)
+    {
+        if (entries is null || !entries.TryGetValue(MetadataPropertyName, out var metadata))
+        {
+            return null;
+        }
+
+        var typeName = metadata.Kind switch
+        {
+            GraphValueKind.Scalar => metadata.ScalarValue as string,
+            GraphValueKind.Map when metadata.Entries.TryGetValue(TypeNameKey, out var value)
+                && value.Kind == GraphValueKind.Scalar
+                => value.ScalarValue as string,
+            _ => null,
+        };
+
+        return ResolveTypeName(typeName);
+    }
+
+    private static Type? ResolveTypeName(string? typeName)
+    {
+        if (typeName is null)
+        {
+            return null;
+        }
+
+        if (ResolvedMetadataTypes.TryGetValue(typeName, out var cached))
+        {
+            return cached;
+        }
+
+        var resolved = Type.GetType(typeName);
+        if (resolved != null && !resolved.Assembly.IsCollectible)
+        {
+            // A collectible type must not be retained by a process-wide cache; it would keep its
+            // AssemblyLoadContext alive and defeat runtime unload.
+            ResolvedMetadataTypes.TryAdd(typeName, resolved);
+        }
+
+        return resolved;
     }
 
     private static bool TryConvertCollection(
