@@ -94,6 +94,45 @@ public sealed class GraphResultMaterializer
         return MaterializeSingleElement<T>(entityInfos.FirstOrDefault(), targetType);
     }
 
+    /// <summary>
+    /// Materializes whole native path values, one per record, into graph paths. This is the AGE
+    /// native shortest-path shape; decomposed <c>TraversePaths</c> rows continue to use
+    /// <see cref="MaterializeAsync{T}"/>.
+    /// </summary>
+    public T? MaterializeNativeGraphPaths<T>(
+        IReadOnlyList<GraphRecord> records,
+        (Type Source, Type Relationship, Type Target) graphPathTypes,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var targetType = typeof(T);
+        var elementType = GraphResultTypeHelpers.GetTargetTypeIfCollection(targetType);
+        var isCollectionType = targetType != elementType;
+        if (elementType != typeof(IGraphPath))
+        {
+            throw new GraphException(
+                $"Native graph paths can only materialize as {nameof(IGraphPath)} or a collection of it.");
+        }
+
+        var paths = new List<IGraphPath>(records.Count);
+        foreach (var record in records)
+        {
+            var path = record["p"];
+            var hops = _resultProcessor.ProcessNativeGraphPath(
+                path,
+                graphPathTypes.Source,
+                graphPathTypes.Relationship,
+                graphPathTypes.Target);
+            paths.Add(MaterializeGraphPath(hops, graphPathTypes));
+        }
+
+        return isCollectionType
+            ? ConvertToCollectionType<T>([.. paths], elementType)
+            : (T?)paths.FirstOrDefault();
+    }
+
     /// <summary>Processes one decomposed graph-path hop.</summary>
     public GraphResultProcessor.GraphPathHop ProcessGraphPathHop(
         GraphRecord record,

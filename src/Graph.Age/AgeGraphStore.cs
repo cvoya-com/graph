@@ -5,6 +5,7 @@ namespace Cvoya.Graph.Age;
 
 using Cvoya.Graph.Age.Core;
 using Cvoya.Graph.Age.Querying;
+using Cvoya.Graph.Age.Querying.Cypher;
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
 using Cvoya.Graph.Age.Schema;
 using Microsoft.Extensions.Logging;
@@ -25,6 +26,7 @@ public sealed class AgeGraphStore : IAsyncDisposable
     private readonly SemaphoreSlim provisioningGate = new(1, 1);
     private int disposed;
     private volatile bool graphReady;
+    private AgeDialect? dialect;
 
     /// <summary>Initializes a store from a PostgreSQL connection string.</summary>
     /// <param name="connectionString">The connection string, or <see langword="null"/> to use <c>AGE_CONNECTION_STRING</c>.</param>
@@ -190,6 +192,16 @@ public sealed class AgeGraphStore : IAsyncDisposable
 
     internal string GraphName { get; }
 
+    /// <summary>
+    /// Gets the dialect for the connected AGE server. The installed extension version is detected
+    /// once on the first connection and cached on this store.
+    /// </summary>
+    internal AgeDialect Dialect => Volatile.Read(ref dialect)
+        ?? throw new GraphException("The Apache AGE extension version has not been detected. Open a connection first.");
+
+    /// <summary>Gets the capabilities of the connected AGE server.</summary>
+    internal CapabilitySet Capabilities => Dialect.Capabilities;
+
     internal ILoggerFactory LoggerFactory { get; }
 
     /// <summary>
@@ -226,6 +238,7 @@ public sealed class AgeGraphStore : IAsyncDisposable
         try
         {
             await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
+            await DetectDialectAsync(connection, cancellationToken).ConfigureAwait(false);
             return connection;
         }
         catch
@@ -464,6 +477,32 @@ public sealed class AgeGraphStore : IAsyncDisposable
     {
         graphName ??= Environment.GetEnvironmentVariable("AGE_GRAPH") ?? "cvoya_graph";
         return AgeSqlIdentifier.Validate(graphName, "graph name");
+    }
+
+    /// <summary>
+    /// Detects and caches the installed AGE extension version. Capabilities differ between 1.7
+    /// and 1.8, so the provider cannot use one static dialect for every server.
+    /// </summary>
+    private async Task DetectDialectAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        if (dialect is not null)
+        {
+            return;
+        }
+
+        var command = connection.CreateCommand();
+        await using var commandLease = command.ConfigureAwait(false);
+        command.CommandText = "SELECT extversion FROM pg_extension WHERE extname = 'age'";
+        var extversion = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        if (string.IsNullOrWhiteSpace(extversion))
+        {
+            throw new GraphException("The Apache AGE extension is not installed in this database.");
+        }
+
+        var detected = AgeDialect.ForVersion(AgeDialect.ParseServerVersion(extversion));
+        Interlocked.CompareExchange(ref dialect, detected, null);
     }
 
     private static async Task ConfigureConnectionAsync(

@@ -14,24 +14,8 @@ namespace Cvoya.Graph.Age.Querying.Cypher;
 /// </summary>
 public sealed class AgeDialect : ICypherDialect
 {
-    private static readonly CapabilitySet SupportedCapabilities = CapabilitySet.Of(
-        GraphCapability.FullTextSearch,
-        GraphCapability.Transactions,
-        GraphCapability.ComplexPropertyCascade,
-        GraphCapability.MultiLabelMatch,
-        GraphCapability.LabelFiltering,
-        GraphCapability.OptionalTraversal,
-        GraphCapability.CallSubqueries,
-        GraphCapability.PatternSizeProjection,
-        GraphCapability.GroupByAggregation,
-        GraphCapability.RelationshipPredicates,
-        GraphCapability.SetOperations,
-        GraphCapability.NullElementsInSimpleCollections);
-
-    // The shared planner may represent scalar projected sort keys and path-decomposition order
-    // coordinates as variable references. Let it construct those internal rows, while the AGE
-    // expression validator rejects caller-authored whole-entity ordering before planning.
-    private static readonly CapabilitySet PlanningCapabilities = CapabilitySet.Of(
+    private static readonly GraphCapability[] BaseCapabilityValues =
+    [
         GraphCapability.FullTextSearch,
         GraphCapability.Transactions,
         GraphCapability.ComplexPropertyCascade,
@@ -44,7 +28,32 @@ public sealed class AgeDialect : ICypherDialect
         GraphCapability.RelationshipPredicates,
         GraphCapability.SetOperations,
         GraphCapability.NullElementsInSimpleCollections,
-        GraphCapability.OrderByEntity);
+    ];
+
+    // Apache AGE 1.8.0 added native age_shortest_path/age_all_shortest_paths. AGE 1.7.0 has
+    // neither function, so the capability must stay absent there rather than being advertised
+    // unconditionally by the provider.
+    private static readonly GraphCapability[] NativeCapabilityValues =
+    [
+        .. BaseCapabilityValues,
+        GraphCapability.ShortestPath,
+    ];
+
+    // The shared planner may represent scalar projected sort keys and path-decomposition order
+    // coordinates as variable references. Let it construct those internal rows, while the AGE
+    // expression validator rejects caller-authored whole-entity ordering before planning.
+    private static readonly CapabilitySet PlanningCapabilities = CapabilitySet.Of(
+        [
+            .. BaseCapabilityValues,
+            GraphCapability.OrderByEntity,
+        ]);
+
+    private static readonly CapabilitySet NativePlanningCapabilities = CapabilitySet.Of(
+        [
+            .. BaseCapabilityValues,
+            GraphCapability.ShortestPath,
+            GraphCapability.OrderByEntity,
+        ]);
 
     private static readonly CapabilitySet CommandPlanningCapabilities = CapabilitySet.Of(
         GraphCapability.FullTextSearch,
@@ -61,26 +70,69 @@ public sealed class AgeDialect : ICypherDialect
         GraphCapability.OrderByEntity,
         GraphCapability.RelationshipPredicates);
 
+    private static readonly CapabilitySet SupportedCapabilities = CapabilitySet.Of(BaseCapabilityValues);
+    private static readonly CapabilitySet NativeSupportedCapabilities = CapabilitySet.Of(NativeCapabilityValues);
+
     private readonly CapabilitySet capabilities;
+    private readonly bool nativeShortestPath;
+
+    /// <summary>Gets the first Apache AGE version that exposes the native shortest-path functions.</summary>
+    internal static Version MinimumNativeShortestPathVersion { get; } = new(1, 8, 0);
 
     /// <summary>Initializes the Apache AGE dialect.</summary>
+    /// <remarks>This parameterless dialect describes the AGE 1.7 baseline.</remarks>
     public AgeDialect()
-        : this(SupportedCapabilities)
+        : this(SupportedCapabilities, nativeShortestPath: false)
     {
     }
 
-    private AgeDialect(CapabilitySet capabilities) => this.capabilities = capabilities;
+    private AgeDialect(CapabilitySet capabilities, bool nativeShortestPath)
+    {
+        this.capabilities = capabilities;
+        this.nativeShortestPath = nativeShortestPath;
+    }
 
-    /// <summary>Gets the shared Apache AGE dialect instance.</summary>
+    /// <summary>Gets the shared Apache AGE 1.7 dialect instance.</summary>
     public static AgeDialect Instance { get; } = new();
 
-    internal static AgeDialect PlanningInstance { get; } = new(PlanningCapabilities);
+    internal static AgeDialect PlanningInstance { get; } = new(PlanningCapabilities, nativeShortestPath: false);
+
+    private static AgeDialect NativeInstance { get; } = new(NativeSupportedCapabilities, nativeShortestPath: true);
+
+    private static AgeDialect NativePlanningInstance { get; } =
+        new(NativePlanningCapabilities, nativeShortestPath: true);
 
     /// <summary>
     /// Gets the planning dialect for command selections. Command selections end in a scalar
     /// native-id projection and share the same relationship-existence lowering as read queries.
     /// </summary>
-    internal static AgeDialect CommandPlanningInstance { get; } = new(CommandPlanningCapabilities);
+    internal static AgeDialect CommandPlanningInstance { get; } = new(CommandPlanningCapabilities, nativeShortestPath: false);
+
+    /// <summary>Gets the dialect matching the connected AGE server version.</summary>
+    /// <param name="version">The installed AGE extension version.</param>
+    internal static AgeDialect ForVersion(Version version)
+    {
+        ArgumentNullException.ThrowIfNull(version);
+        return version >= MinimumNativeShortestPathVersion ? NativeInstance : Instance;
+    }
+
+    /// <summary>Parses an AGE <c>extversion</c> string, tolerating suffixes and two-part versions.</summary>
+    /// <param name="extversion">The value of <c>pg_extension.extversion</c>.</param>
+    internal static Version ParseServerVersion(string extversion)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(extversion);
+        var numeric = new string(extversion.TakeWhile(character => char.IsAsciiDigit(character) || character == '.').ToArray())
+            .TrimEnd('.');
+        return Version.TryParse(numeric, out var parsed)
+            ? new Version(parsed.Major, parsed.Minor, Math.Max(parsed.Build, 0), Math.Max(parsed.Revision, 0))
+            : new Version(0, 0, 0, 0);
+    }
+
+    /// <summary>Gets the dialect variant that plans read queries for this server.</summary>
+    internal AgeDialect Planning => nativeShortestPath ? NativePlanningInstance : PlanningInstance;
+
+    /// <summary>Gets whether native shortest-path functions are available on this server.</summary>
+    internal bool SupportsNativeShortestPath => nativeShortestPath;
 
     /// <inheritdoc/>
     public string Name => "Apache AGE";

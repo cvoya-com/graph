@@ -17,10 +17,11 @@ public sealed class AgeHarness(AgeGraphCleanupFixture graphCleanup) : IGraphProv
     private readonly string connectionString = Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
         ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
     private NpgsqlDataSource? dataSource;
+    private CapabilitySet capabilities = AgeDialect.Instance.Capabilities;
 
     public string ProviderName => "Cvoya.Graph.Age";
 
-    public CapabilitySet Capabilities => AgeDialect.Instance.Capabilities;
+    public CapabilitySet Capabilities => capabilities;
 
     public async ValueTask InitializeAsync()
     {
@@ -33,6 +34,7 @@ public sealed class AgeHarness(AgeGraphCleanupFixture graphCleanup) : IGraphProv
                 dataSource,
                 "cvoya_tck",
                 TestContext.Current.CancellationToken);
+            capabilities = store.Capabilities;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

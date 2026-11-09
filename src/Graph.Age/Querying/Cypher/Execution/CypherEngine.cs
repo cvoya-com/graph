@@ -38,6 +38,7 @@ internal sealed class CypherEngine
 
     private static readonly HashSet<MethodInfo> NonEmptyAggregateTerminalMethods = CreateNonEmptyAggregateTerminalMethods();
 
+    private readonly AgeGraphContext _context;
     private readonly EntityFactory _entityFactory;
     private readonly ILogger<CypherEngine> _logger;
     private readonly CypherExecutor _executor;
@@ -49,25 +50,28 @@ internal sealed class CypherEngine
     private readonly string _graphName;
     private readonly ComplexPropertyManager _complexPropertyManager;
 
-    public CypherEngine(
-        EntityFactory entityFactory,
-        SchemaRegistry schemaRegistry,
-        string graphName,
-        ComplexPropertyManager complexPropertyManager,
-        ILoggerFactory? loggerFactory)
+    public CypherEngine(AgeGraphContext context)
     {
-        _entityFactory = entityFactory ?? throw new ArgumentNullException(nameof(entityFactory));
-        _logger = loggerFactory?.CreateLogger<CypherEngine>() ?? NullLogger<CypherEngine>.Instance;
+        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _entityFactory = context.EntityFactory;
+        _logger = context.LoggerFactory?.CreateLogger<CypherEngine>() ?? NullLogger<CypherEngine>.Instance;
 
         // Create our internal components
-        _executor = new CypherExecutor(loggerFactory);
-        _materializer = new GraphResultMaterializer(entityFactory, loggerFactory);
-        _loggerFactory = loggerFactory;
-        _schemaRegistry = schemaRegistry ?? throw new ArgumentNullException(nameof(schemaRegistry));
-        _graphName = graphName ?? throw new ArgumentNullException(nameof(graphName));
-        _complexPropertyManager = complexPropertyManager ?? throw new ArgumentNullException(nameof(complexPropertyManager));
-        _fullTextSearchRewriter = new AgeFullTextSearchRewriter(schemaRegistry);
+        _executor = new CypherExecutor(context.LoggerFactory);
+        _materializer = new GraphResultMaterializer(context.EntityFactory, context.LoggerFactory);
+        _loggerFactory = context.LoggerFactory;
+        _schemaRegistry = context.SchemaRegistry;
+        _graphName = context.GraphName;
+        _complexPropertyManager = context.ComplexPropertyManager;
+        _fullTextSearchRewriter = new AgeFullTextSearchRewriter(context.SchemaRegistry);
     }
+
+    /// <summary>
+    /// Gets the dialect of the connected AGE server. Resolving this lazily is required because the
+    /// engine is created when a queryable is built, before the first connection has performed
+    /// server-version detection.
+    /// </summary>
+    private AgeDialect Dialect => _context.Store.Dialect;
 
     internal static void ValidateMutation(GraphMutationModel mutation)
     {
@@ -416,7 +420,7 @@ internal sealed class CypherEngine
         CancellationToken cancellationToken)
     {
         statement = CypherQueryVisitor.LowerStatement(statement, _schemaRegistry.HasComplexProperties);
-        var rendered = new CypherRenderer(AgeDialect.Instance).Render(statement);
+        var rendered = new CypherRenderer(Dialect).Render(statement);
         var projectionColumns = rendered.ProjectionColumns
             .Select(AgeEntityProjectionPass.NormalizeProjectionColumn)
             .ToArray();
@@ -480,6 +484,16 @@ internal sealed class CypherEngine
                 adapted = CollapseUnionCountBranches(adapted);
             }
 
+            // AGE's native shortest-path functions return one whole path value per row, unlike the
+            // decomposed per-hop rows produced by the shared TraversePaths plan.
+            if (cypherQuery.IsNativeGraphPath && cypherQuery.GraphPathTypes is { } nativePathTypes)
+            {
+                return _materializer.MaterializeNativeGraphPaths<T>(
+                    adapted,
+                    nativePathTypes,
+                    cancellationToken);
+            }
+
             var result = await _materializer.MaterializeAsync<T>(
                 adapted,
                 cypherQuery.GraphPathTypes,
@@ -537,6 +551,23 @@ internal sealed class CypherEngine
 
         if (cypherQuery.GraphPathTypes is { } graphPathTypes && typeof(T) == typeof(IGraphPath))
         {
+            if (cypherQuery.IsNativeGraphPath)
+            {
+                await foreach (var record in records.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    var path = _materializer.MaterializeNativeGraphPaths<IGraphPath>(
+                        [_recordAdapter.Adapt(record)],
+                        graphPathTypes,
+                        cancellationToken);
+                    if (path is not null)
+                    {
+                        yield return (T)path;
+                    }
+                }
+
+                yield break;
+            }
+
             await foreach (var path in StreamGraphPathsAsync(records, graphPathTypes, cancellationToken)
                 .WithCancellation(cancellationToken)
                 .ConfigureAwait(false))
@@ -768,7 +799,7 @@ internal sealed class CypherEngine
         // Extract the element type from the expression if the type is a collection
         var elementType = ExtractElementType(type, expression);
 
-        var visitor = new CypherQueryVisitor(elementType, loggerFactory, _schemaRegistry.HasComplexProperties);
+        var visitor = new CypherQueryVisitor(elementType, Dialect, _graphName, loggerFactory, _schemaRegistry.HasComplexProperties);
         visitor.Visit(expression);
 
         var query = visitor.Query;
@@ -787,7 +818,8 @@ internal sealed class CypherEngine
             query.GraphPathTypes,
             query.ProjectionColumns,
             query.PostProcessing,
-            query.SumUnionCountBranches);
+            query.SumUnionCountBranches,
+            query.IsNativeGraphPath);
     }
 
     private async Task<IReadOnlyList<IEntity>> LoadMixedSearchEntitiesAsync(
