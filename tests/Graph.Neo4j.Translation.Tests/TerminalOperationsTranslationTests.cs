@@ -4,6 +4,7 @@
 namespace Cvoya.Graph.Neo4j.Translation.Tests;
 
 using System.Linq.Expressions;
+using System.Reflection;
 using Cvoya.Graph;
 using Cvoya.Graph.Neo4j.Translation.Tests.Harness;
 using Cvoya.Graph.Neo4j.Translation.Tests.Model;
@@ -243,6 +244,31 @@ public class TerminalOperationsTranslationTests : TranslationTestBase
     }
 
     [Fact]
+    public Task SynchronousCount_NoPredicate()
+    {
+        var source = Root.Nodes<Person>();
+        var expr = QueryableTerminalCall(source, nameof(Queryable.Count));
+        return VerifyTranslation(typeof(Person), expr);
+    }
+
+    [Fact]
+    public Task SynchronousLongCount_NoPredicate()
+    {
+        var source = Root.Nodes<Person>();
+        var expr = QueryableTerminalCall(source, nameof(Queryable.LongCount));
+        return VerifyTranslation(typeof(Person), expr);
+    }
+
+    [Fact]
+    public Task SynchronousCount_WithPredicate()
+    {
+        var source = Root.Nodes<Person>();
+        Expression<Func<Person, bool>> predicate = p => p.Age > 18;
+        var expr = QueryableTerminalCall(source, nameof(Queryable.Count), Expression.Quote(predicate));
+        return VerifyTranslation(typeof(Person), expr);
+    }
+
+    [Fact]
     public Task Count_WithPredicate()
     {
         var source = Root.Nodes<Person>();
@@ -429,5 +455,23 @@ public class TerminalOperationsTranslationTests : TranslationTestBase
         var placeholder = new FakeGraphNodeQueryable<Person>(provider, Expression.Constant(null, typeof(Expression)));
         var expression = Expression.Constant(placeholder, typeof(IGraphQueryable<Person>));
         return new FakeGraphNodeQueryable<Person>(provider, expression);
+    }
+
+    /// <summary>
+    /// Builds the real synchronous <see cref="Queryable"/> terminal call so dispatch is exercised by
+    /// method identity rather than through the internal async marker stand-ins.
+    /// </summary>
+    private static MethodCallExpression QueryableTerminalCall(
+        IQueryable source,
+        string methodName,
+        params Expression[] additionalArguments)
+    {
+        var method = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(candidate => candidate.Name == methodName && candidate.IsGenericMethodDefinition)
+            .Where(candidate => candidate.GetParameters().Length == additionalArguments.Length + 1)
+            .Single()
+            .MakeGenericMethod(source.ElementType);
+        return Expression.Call(method, [source.Expression, .. additionalArguments]);
     }
 }

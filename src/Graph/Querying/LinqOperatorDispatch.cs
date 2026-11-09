@@ -44,6 +44,11 @@ internal static class LinqOperatorDispatch
         AddAll(typeof(Queryable), nameof(Queryable.Distinct), LinqOperator.Distinct);
         AddAll(typeof(Queryable), nameof(Queryable.First), LinqOperator.First);
         AddAll(typeof(Queryable), nameof(Queryable.FirstOrDefault), LinqOperator.First);
+        // The synchronous Queryable terminals must resolve by identity just like their async
+        // marker counterparts; otherwise Queryable.Count()/LongCount() throw at translation time
+        // even though the planner and both providers already implement TerminalOperation.Count.
+        AddAll(typeof(Queryable), nameof(Queryable.Count), LinqOperator.Count);
+        AddAll(typeof(Queryable), nameof(Queryable.LongCount), LinqOperator.Count);
         AddAll(typeof(Queryable), nameof(Queryable.Single), LinqOperator.Single);
         AddAll(typeof(Queryable), nameof(Queryable.SingleOrDefault), LinqOperator.Single);
         AddAll(typeof(Queryable), nameof(Queryable.Contains), LinqOperator.Contains);
