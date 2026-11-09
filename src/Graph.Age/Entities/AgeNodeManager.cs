@@ -126,7 +126,7 @@ internal sealed class AgeNodeManager(AgeGraphContext context)
         return properties;
     }
 
-    private static IReadOnlyList<string> ResolveInheritanceLabels(EntityInfo entity)
+    private static List<string> ResolveInheritanceLabels(EntityInfo entity)
     {
         // Dynamic nodes and explicitly labelled instances own their logical label list. Typed
         // nodes derive it from the explicitly attributed CLR base-type chain, root label first.
