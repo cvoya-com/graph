@@ -4,11 +4,11 @@
 |---|---|
 | Provider | `Cvoya.Graph.Age` (issue #86 implementation) |
 | Compliance suite | Repository build (`Cvoya.Graph.CompatibilityTests` 0.0.0-dev) |
-| Candidate source | `7131eeac2f68b8e3165eca92537aa1c3f0a36cd1` |
-| Backing store | Apache AGE 1.7.0 / PostgreSQL 18.1 (Debian 18.1-1.pgdg13+2) (`apache/age:release_PG18_1.7.0`, image `17ac069ae4505520fde3bac5fb9fbaca01273056474190cd3af0e96f818aec02`) |
+| Candidate source | `8ddfa3bfe6289626df1cb0be5457355f5625f1a6` |
+| Backing store | Apache AGE 1.8.0 / PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) (`apache/age:release_PG18_1.8.0`) as the primary store; Apache AGE 1.7.0 / PostgreSQL 18.1 (Debian 18.1-1.pgdg13+2) (`apache/age:release_PG18_1.7.0`) also validated |
 | Reference provider | Neo4j 5.26.28 Enterprise (`neo4j:5-enterprise`, image `037e96a1ddb9581ba8dc420a03dbced3ffe303b7f126628dfa477566481786f0`) |
-| Date / run | 2026-07-23 / local strict final certification |
-| Retained evidence root | `artifacts/compliance/393-7131eeac/` (local, gitignored) |
+| Date / run | 2026-11-09 / local NUL-88 AGE 1.8 compatibility verification |
+| Retained evidence root | `artifacts/compliance/NUL-88/` (local, gitignored) |
 
 ## Certified v1.0 boundary
 
@@ -140,26 +140,68 @@ inside one transaction. All-new endpoint creation distinguishes value-equal node
 self-loop, and caller-owned multi-statement operations roll back to an operation savepoint on any
 validation, cancellation, or database failure.
 
+## AGE 1.8 native-identity compatibility (NUL-88)
+
+Apache AGE 1.8.0 / PostgreSQL 18.6 segfaults when `id()` is the left operand of `IN`, for
+example `MATCH (n) WHERE id(n) IN $ids`. Non-identity list membership (`node.Tags IN $list`,
+`... IN $relationshipTypes`) is safe on the same build, so the defect is the native graphid
+operand rather than list parameters as a class. The crash terminates the backend with
+`signal 11`; follow-up statements fail with `57P03` until recovery completes.
+
+The provider now never emits `id(...) IN ...`:
+
+- `AgeDialect.RenderCollectionContains` renders native-identity membership as
+  `size([item IN $list WHERE item = id(alias)]) > 0`. Stored-collection membership keeps the
+  shared null-aware `toString()` form because AGE 1.7.0 does not match an agtype null parameter
+  with `IS NULL`, while AGE 1.8.0 does.
+- `ExpressionToCypherAstLowerer` routes `NativeElementIdentity` through the dialect's
+  collection-membership hook even when the collection is a parameter, so the full-text search
+  graphid filter cannot bypass the dialect.
+- `ComplexPropertyManager` replaces `id(parent) IN $parentGraphIds` with a list-comprehension
+  membership test for complex-collection replacement and deletion.
+- `CypherEngine.ValidateUnselectedConstraintsAsync` replaces
+  `NOT (id(candidate) IN $selectedIds)` with
+  `size([selectedId IN $selectedIds WHERE id(candidate) = selectedId]) = 0`.
+
+The list-comprehension form preserves empty-list, deduplication, counting, ordering, and
+transaction semantics. Regression coverage lives in `AgeDialectTests`,
+`AgeFullTextSearchRewriterTests`, and `AgeListParameterRegressionTests`.
+
 ## Results
 
 | Inventory test methods | Executed | Capability-skipped | Statically skipped | Failed |
 |---|---|---|---|---|
-| 501 | 499 | 2 | 0 | 0 |
+| 502 | 500 | 2 | 0 | 0 |
 
 The inventory was derived from the candidate assemblies with
 `AgeDialect.Instance.Capabilities`, `ComplianceInventory.TotalTestMethods`,
 `ComplianceInventory.MinimumExecuted(declared)`, and
-`ComplianceInventory.ExpectedCapabilitySkips(declared)`. It reports 501 runnable compatibility
-methods, 499 required methods, and 2 expected capability skips. The strict guard passed, proving
-that every method eligible under every advertised AGE capability executed. Theory rows expand the
-provider run to 727 runtime cases: 725 passed, 2 capability-skipped, and 0 failed.
+`ComplianceInventory.ExpectedCapabilitySkips(declared)`. It reports 502 runnable compatibility
+methods, 500 required methods, and 2 expected capability skips. The inventory guard passed in the
+fast lane, and the AGE run executed all 500 required methods with only the two declared capability
+skips. Theory rows and the provider-specific adapter tests expand the provider run to 733 runtime
+cases: 731 passed, 2 capability-skipped, and 0 failed.
 
-| Strict run | Runtime cases | Passed | Expected skips | Failed | TRX |
+### AGE backing-store matrix (NUL-88)
+
+| Run | Backing store | Runtime cases | Passed | Expected skips | Failed | `signal 11` | Container restarts |
+|---|---|---:|---:|---:|---:|---:|---:|
+| AGE 1.8 run 1 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 733 | 731 | 2 | 0 | 0 | 0 |
+| AGE 1.8 run 2 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 733 | 731 | 2 | 0 | 0 | 0 |
+| AGE 1.7 baseline (fresh container) | AGE 1.7.0 / PostgreSQL 18.1 | 733 | 731 | 2 | 0 | 0 | 0 |
+
+Both AGE 1.8 containers were created from `apache/age:release_PG18_1.8.0` after the fix and
+received the full lane once. After every run, `docker logs` contained no `signal 11` or
+`terminated by signal`, `pg_isready` and `SELECT 1` succeeded, and the restart count stayed 0.
+The 1.7 run used a fresh `apache/age:release_PG18_1.7.0` container and the same 733-case suite.
+Raw logs: `age18-lane-run1.log`, `age18-lane-run2.log`, and `age17-lane-run1.log`.
+
+| Prior strict run | Runtime cases | Passed | Expected skips | Failed | TRX |
 |---|---:|---:|---:|---:|---|
 | Compatibility meta-tests | 30 | 28 | 2 | 0 | `strict-meta/graph-compatibilitytests-tests/graph-compatibilitytests-tests.trx` |
 | InMemory provider | 541 | 540 | 1 | 0 | `strict-inmemory/graph-inmemory-tests/graph-inmemory-tests.trx` |
 | Neo4j provider | 616 | 616 | 0 | 0 | `strict-neo4j/graph-neo4j-tests/graph-neo4j-tests.trx` |
-| AGE provider | 727 | 725 | 2 | 0 | `strict-age/graph-age-tests/graph-age-tests.trx` |
+| AGE provider (superseded by the matrix above) | 733 | 731 | 2 | 0 | `strict-age/graph-age-tests/graph-age-tests.trx` |
 
 TRX paths are relative to the retained evidence root in the report header. There were no
 infrastructure, discovery, static, ad hoc, or unplanned capability skips.
