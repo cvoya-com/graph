@@ -4,11 +4,11 @@
 |---|---|
 | Provider | `Cvoya.Graph.Age` (issue #86 implementation) |
 | Compliance suite | Repository build (`Cvoya.Graph.CompatibilityTests` 0.0.0-dev) |
-| Candidate source | `8ddfa3bfe6289626df1cb0be5457355f5625f1a6` |
+| Candidate source | `79ed6fa83b8442cd5c8f208d58d3ce3f191b497a` |
 | Backing store | Apache AGE 1.8.0 / PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) (`apache/age:release_PG18_1.8.0`) as the primary store; Apache AGE 1.7.0 / PostgreSQL 18.1 (Debian 18.1-1.pgdg13+2) (`apache/age:release_PG18_1.7.0`) also validated |
 | Reference provider | Neo4j 5.26.28 Enterprise (`neo4j:5-enterprise`, image `037e96a1ddb9581ba8dc420a03dbced3ffe303b7f126628dfa477566481786f0`) |
-| Date / run | 2026-11-09 / local NUL-88 AGE 1.8 compatibility verification |
-| Retained evidence root | `artifacts/compliance/NUL-88/` (local, gitignored) |
+| Date / run | 2026-11-09 / local NUL-89 native shortest-path verification |
+| Retained evidence root | `artifacts/compliance/NUL-89/` (local, gitignored) |
 
 ## Certified v1.0 boundary
 
@@ -37,7 +37,7 @@
 | MultiLabelMatch | Yes | An AGE AST pass lowers logical inheritance labels to AGE-compatible predicates. |
 | LabelFiltering | Yes | Caller-supplied labels lower to escaped literal membership tests over physical and logical inheritance labels. |
 | OrderByEntity | No | Scalar property ordering is supported; bare whole-entity ordering is rejected rather than rewritten to public `Id`. |
-| ShortestPath | No | Deliberately unsupported for v1.0; the capability-gated shortest-path contract skips for AGE. #355 tracks any future implementation. |
+| ShortestPath | Yes on AGE >= 1.8.0 | Lowered to the native `ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths` functions. The capability is absent on AGE 1.7.0, which has neither function. |
 | OptionalTraversal | Yes | Optional matches are lowered while preserving owners with absent paths. |
 | GroupByAggregation | Yes | The shared structured `WITH` plan uses AGE-native grouping and aggregate functions. |
 | RelationshipPredicates | Yes | Per-hop predicates use indexed list filtering; anchored existence uses optional-match count stages. |
@@ -167,34 +167,56 @@ The list-comprehension form preserves empty-list, deduplication, counting, order
 transaction semantics. Regression coverage lives in `AgeDialectTests`,
 `AgeFullTextSearchRewriterTests`, and `AgeListParameterRegressionTests`.
 
+## AGE 1.8 native shortest paths (NUL-89)
+
+Apache AGE 1.8.0 exposes `ag_catalog.age_shortest_path` and `ag_catalog.age_all_shortest_paths`,
+but it still rejects the Cypher `shortestPath(...)` / `allShortestPaths(...)` pattern syntax. The
+provider therefore never emits that syntax. On the first connection it reads the installed
+`pg_extension.extversion`, caches the matching per-store dialect, and advertises
+`GraphCapability.ShortestPath` only for AGE 1.8.0 or later.
+
+For a shortest-path query the provider plans a normal source/target node-pair match, applies the
+root and endpoint predicates plus `src <> tgt` before the function call, and projects one native
+path value per row:
+`WITH ag_catalog.age_shortest_path(<graph>, src, tgt, <physical edge types>, <direction>, <min>, <max>) AS p`.
+`ShortestPath` uses `age_shortest_path`; `AllShortestPaths` uses `age_all_shortest_paths`. Direction
+maps to `out`, `in`, or `any`; edge types are the physical AGE label names; an unbounded maximum is
+passed as SQL null. The engine hydrates each returned `GraphValue.Path` into `IGraphPath` by
+reusing the existing node/relationship materializer per hop, preserving relationship orientation.
+No client-side enumeration, finite-depth fallback, or provider-local graph algorithm is used.
+
+On AGE 1.7.0 the store caches the baseline dialect, `ShortestPath` stays absent, the
+capability-gated TCK test skips with the recorded capability reason, and reachable shortest-path
+use is rejected before execution by the shared planner. Translation coverage asserts both versions,
+including that the 1.8 plan contains the native functions and no Cypher pattern function.
+
 ## Results
 
-| Inventory test methods | Executed | Capability-skipped | Statically skipped | Failed |
-|---|---|---|---|---|
-| 502 | 500 | 2 | 0 | 0 |
+| AGE server | Inventory test methods | Executed | Capability-skipped | Statically skipped | Failed |
+|---|---:|---:|---:|---:|---:|
+| AGE 1.8.0 | 502 | 501 | 1 | 0 | 0 |
+| AGE 1.7.0 | 502 | 500 | 2 | 0 | 0 |
 
 The inventory was derived from the candidate assemblies with
-`AgeDialect.Instance.Capabilities`, `ComplianceInventory.TotalTestMethods`,
-`ComplianceInventory.MinimumExecuted(declared)`, and
-`ComplianceInventory.ExpectedCapabilitySkips(declared)`. It reports 502 runnable compatibility
-methods, 500 required methods, and 2 expected capability skips. The inventory guard passed in the
-fast lane, and the AGE run executed all 500 required methods with only the two declared capability
-skips. Theory rows and the provider-specific adapter tests expand the provider run to 733 runtime
-cases: 731 passed, 2 capability-skipped, and 0 failed.
+`ComplianceInventory.TotalTestMethods`, `ComplianceInventory.MinimumExecuted(declared)`, and
+`ComplianceInventory.ExpectedCapabilitySkips(declared)`, using the connected store's declared
+capabilities. On AGE 1.8.0 only `OrderByEntity` is capability-skipped; on AGE 1.7.0 both
+`OrderByEntity` and `ShortestPath` are skipped. Theory rows and the provider-specific adapter tests
+expand the provider run to 752 runtime cases: 751 passed and 1 capability-skipped on AGE 1.8.0;
+741 passed and 11 capability-skipped on AGE 1.7.0 (the 9 shortest-path provider tests plus the TCK
+contract and `OrderByEntity`).
 
-### AGE backing-store matrix (NUL-88)
+### AGE backing-store matrix (NUL-89)
 
 | Run | Backing store | Runtime cases | Passed | Expected skips | Failed | `signal 11` | Container restarts |
 |---|---|---:|---:|---:|---:|---:|---:|
-| AGE 1.8 run 1 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 733 | 731 | 2 | 0 | 0 | 0 |
-| AGE 1.8 run 2 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 733 | 731 | 2 | 0 | 0 | 0 |
-| AGE 1.7 baseline (fresh container) | AGE 1.7.0 / PostgreSQL 18.1 | 733 | 731 | 2 | 0 | 0 | 0 |
+| AGE 1.8 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 752 | 751 | 1 | 0 | 0 | 0 |
+| AGE 1.7 baseline (fresh container) | AGE 1.7.0 / PostgreSQL 18.1 | 752 | 741 | 11 | 0 | 0 | 0 |
 
-Both AGE 1.8 containers were created from `apache/age:release_PG18_1.8.0` after the fix and
-received the full lane once. After every run, `docker logs` contained no `signal 11` or
-`terminated by signal`, `pg_isready` and `SELECT 1` succeeded, and the restart count stayed 0.
-The 1.7 run used a fresh `apache/age:release_PG18_1.7.0` container and the same 733-case suite.
-Raw logs: `age18-lane-run1.log`, `age18-lane-run2.log`, and `age17-lane-run1.log`.
+Each container was created afresh from `apache/age:release_PG18_1.8.0` and
+`apache/age:release_PG18_1.7.0` and received the full AGE lane once. After every run, `docker logs`
+contained no `signal 11` or `terminated by signal`, `pg_isready` and `SELECT 1` succeeded, and the
+restart count stayed 0. Raw logs: `age18-lane.log` and `age17-lane.log`.
 
 | Prior strict run | Runtime cases | Passed | Expected skips | Failed | TRX |
 |---|---:|---:|---:|---:|---|
@@ -211,29 +233,32 @@ infrastructure, discovery, static, ad hoc, or unplanned capability skips.
 | Debug build | Passed with 0 errors |
 | Fast test lane | Passed: 8 projects, 2,527 runtime cases |
 | Neo4j lane sanity | Passed: 617 runtime cases |
-| AGE 1.8.0 lane, two fresh containers | Passed: 733 runtime cases each (see matrix above) |
-| AGE 1.7.0 lane, fresh container | Passed: 733 runtime cases |
+| AGE 1.8.0 lane, fresh container | Passed: 752 runtime cases, 0 failed, 0 `signal 11` |
+| AGE 1.7.0 lane, fresh container | Passed: 752 runtime cases, 11 expected skips |
 | All test lane (prior certification, not re-run) | Passed: 10 projects, 3,869 runtime cases |
 | Package validation (prior certification, not re-run) | Passed: exact 9-package / 15-assembly inventory and package-reference consumer build |
-| Formatting (prior certification, not re-run) | Passed with no changes required |
+| Formatting | Passed with no changes required |
 | Portable CodeQL (prior certification, not re-run) | Passed: Actions, C#, and Ruby SARIF each contained 0 results |
 
 ### Expected skip ledger
 
 | Category | Run / exact method | Recorded reason |
 |---|---|---|
-| AGE ShortestPath | AGE / `Cvoya.Graph.Age.Tests.GraphTests.QueryTraversalTests.ShortestPaths_PinSelectionEndpointDirectionNoPathAndSameNodeSemantics` | `Capability 'ShortestPath' not declared by provider 'Cvoya.Graph.Age'` |
+| AGE 1.7 ShortestPath | AGE 1.7 / `Cvoya.Graph.Age.Tests.GraphTests.QueryTraversalTests.ShortestPaths_PinSelectionEndpointDirectionNoPathAndSameNodeSemantics` and the nine `AgeShortestPathIntegrationTests` cases | `Capability 'ShortestPath' not declared by provider 'Cvoya.Graph.Age'` |
 | OrderByEntity architectural exclusion | AGE / `Cvoya.Graph.Age.Tests.GraphTests.AdvancedQueryTests.CanOrderByBareEntity` | `Capability 'OrderByEntity' not declared by provider 'Cvoya.Graph.Age'` |
 | OrderByEntity architectural exclusion | InMemory / `Cvoya.Graph.InMemory.Tests.GraphTests.AdvancedQueryTests.CanOrderByBareEntity` | `Capability 'OrderByEntity' not declared by provider 'Cvoya.Graph.InMemory'` |
 | Deliberate meta-test fixture | Meta / `Cvoya.Graph.CompatibilityTests.Tests.CapabilitySkipTests.RequiresUndeclaredCapability_IsSkippedNotExecuted` | `Capability 'FullTextSearch' not declared by provider 'Cvoya.Graph.CompatibilityTests.Tests.FakeProvider'` |
 | Deliberate meta-test fixture | Meta / `Cvoya.Graph.CompatibilityTests.Tests.InterfaceLevelCapabilitySkipTests.InterfaceGatedTest_MustSkip` | `Capability 'FullTextSearch' not declared by provider 'Cvoya.Graph.CompatibilityTests.Tests.FakeProvider'` |
 
 The provider-neutral shortest-path contract remains in `IQueryTraversalTests` and pins one/all
-shortest-path selection, endpoint direction, no-path, and same-node semantics; AGE skips that
-contract until AGE 1.8 supplies the native capability tracked by #355. Reachable shortest-path use
-is rejected before execution with `GraphQueryTranslationException`; `AgeShortestPathTranslationTests`
-pins that deterministic rejection. Provider-specific adapter, dialect, SQL-envelope, full-text, and
-security tests contribute runtime cases but do not change the compatibility method inventory.
+shortest-path selection, endpoint direction, no-path, and same-node semantics. It runs on AGE 1.8.0
+and skips on AGE 1.7.0; `AgeShortestPathIntegrationTests` additionally pins cycles, ties, multiple
+source/endpoint pairs, all directions, endpoint filtering, source exclusion, paging, count/any
+terminals, typed segment hydration, and backend health. On AGE 1.7.0 reachable shortest-path use is
+rejected before execution with `GraphQueryTranslationException`; `AgeShortestPathTranslationTests`
+pins both the deterministic rejection and the native 1.8 plan shape. Provider-specific adapter,
+dialect, SQL-envelope, full-text, and security tests contribute runtime cases but do not change the
+compatibility method inventory.
 
 ## Reproduction
 

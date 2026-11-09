@@ -256,8 +256,10 @@ The endpoint predicate participates in path matching, not client-side filtering.
 least one relationship; the source node is excluded as an endpoint, including when a cycle or
 self-relationship could lead back to it. Selection is partitioned by source/endpoint pair, so one
 source can return shortest paths to several endpoints. Providers must declare
-`GraphCapability.ShortestPath`; Neo4j and the in-memory provider implement it, while AGE rejects it
-during translation.
+`GraphCapability.ShortestPath`. Neo4j and the in-memory provider implement it. Apache AGE declares the
+capability only when the connected AGE extension is 1.8.0 or later, where the provider lowers the
+operation to `ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths`; AGE 1.7 has
+neither function and rejects the operators during translation.
 
 ### Optional traversal
 
