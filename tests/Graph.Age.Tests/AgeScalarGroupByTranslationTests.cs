@@ -27,28 +27,36 @@ public sealed class AgeScalarGroupByTranslationTests
 
         var translated = Translate(query);
 
-        // A grouped aggregate keeps the containment fallback: a key such as LastName can occur
-        // in Person and in a derived label table, so per-label UNION ALL branches would emit
-        // duplicate groups.
-        Assert.Contains("MATCH (src)", translated.Text);
-        Assert.Contains(
-            "properties(src) @> { inheritance_labels: ['Person'] }",
-            translated.Text,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain("'Person' IN labels(src)", translated.Text, StringComparison.Ordinal);
+        // `Person` has physical subtypes, so the grouped aggregates expand into one branch per
+        // label table. `avg` is decomposed into a partial sum and a partial non-null count; the
+        // wrapper merges the counts and divides.
+        Assert.Contains("UNION ALL", translated.Text, StringComparison.Ordinal);
         Assert.Contains("WHERE", translated.Text);
         Assert.Contains("src.Age >= $p0\nWITH src.LastName AS __key", translated.Text);
-        Assert.Contains("count(src) AS __a0", translated.Text);
+        Assert.Contains("count(1) AS __a0", translated.Text);
         Assert.Contains("coalesce(sum(src.Age), 0) AS __a1", translated.Text);
-        Assert.Contains("avg(src.Age) AS __a2", translated.Text);
+        Assert.Contains("sum(src.Age) AS __a2", translated.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "count(src.Age) AS __age_union_avg_count0",
+            translated.Text,
+            StringComparison.Ordinal);
         Assert.Contains("min(src.Age) AS __a3", translated.Text);
         Assert.Contains("max(src.Age) AS __a4", translated.Text);
         Assert.Contains(
             "RETURN __key AS LastName, __a0 AS `Count`, __a1 AS TotalAge, __a2 AS AverageAge, " +
-            "__a3 AS Youngest, __a4 AS Oldest",
+            "__a3 AS Youngest, __a4 AS Oldest, " +
+            "__age_union_avg_count0 AS __age_union_avg_count0",
             translated.Text);
         Assert.Equal(
-            ["LastName", "Count", "TotalAge", "AverageAge", "Youngest", "Oldest"],
+            [
+                "LastName",
+                "Count",
+                "TotalAge",
+                "AverageAge",
+                "Youngest",
+                "Oldest",
+                "__age_union_avg_count0",
+            ],
             translated.ProjectionColumns);
     }
 
@@ -64,7 +72,7 @@ public sealed class AgeScalarGroupByTranslationTests
         var translated = Translate(query);
 
         Assert.Contains("WITH CASE WHEN src.Age >= $p0 THEN $p1 ELSE $p2 END AS __key", translated.Text);
-        Assert.Contains("count(src) AS __a0", translated.Text);
+        Assert.Contains("count(1) AS __a0", translated.Text);
         Assert.EndsWith("RETURN __key AS Band, __a0 AS `Count`", translated.Text, StringComparison.Ordinal);
         Assert.Equal(["Band", "Count"], translated.ProjectionColumns);
     }
@@ -80,7 +88,7 @@ public sealed class AgeScalarGroupByTranslationTests
         var translated = Translate(query);
 
         Assert.Contains("WITH src.LastName AS __key", translated.Text);
-        Assert.Contains("count(src) AS __a0", translated.Text);
+        Assert.Contains("count(1) AS __a0", translated.Text);
         Assert.EndsWith("RETURN __key AS LastName, __a0 AS Total", translated.Text, StringComparison.Ordinal);
         Assert.Equal(["LastName", "Total"], translated.ProjectionColumns);
     }

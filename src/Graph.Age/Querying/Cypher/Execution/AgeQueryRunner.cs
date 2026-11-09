@@ -762,7 +762,10 @@ internal sealed partial class AgeQueryRunner
              (aggregatePlan.GroupColumnIndexes.Any(index =>
                   index < 0 || index >= postProcessing.ResultColumnCount) ||
               aggregatePlan.Aggregates.Any(aggregate =>
-                  aggregate.ColumnIndex < 0 || aggregate.ColumnIndex >= postProcessing.ResultColumnCount))))
+                  aggregate.ColumnIndex < 0 ||
+                  aggregate.ColumnIndex >= postProcessing.ResultColumnCount ||
+                  (aggregate.AuxiliaryColumnIndex is { } auxiliary &&
+                   (auxiliary < 0 || auxiliary >= projectionColumns.Count))))))
         {
             throw new GraphException(
                 "AGE post-processing column index is outside the rendered projection.");
@@ -794,7 +797,7 @@ internal sealed partial class AgeQueryRunner
                     aggregate.ColumnIndex == index);
                 selectList.Add(combine is null
                     ? $"age_result.{quoted}"
-                    : $"{combine.Function}((age_result.{quoted})::text::numeric)::text::ag_catalog.agtype AS {quoted}");
+                    : $"{RenderAggregateCombine(combine, quoted, projectionColumns)} AS {quoted}");
             }
         }
         else
@@ -838,6 +841,56 @@ internal sealed partial class AgeQueryRunner
         }
 
         return commandText;
+    }
+
+    /// <summary>
+    /// Builds the SQL expression that merges one partial aggregate column across union branches.
+    /// </summary>
+    /// <remarks>
+    /// The merge is type-aware where AGE's agtype comparison is required:
+    /// <list type="bullet">
+    /// <item><description><c>sum</c>/<c>count</c> are numeric and add.</description></item>
+    /// <item><description><c>avg</c> combines a partial sum with a partial non-null count.</description></item>
+    /// <item><description><c>min</c>/<c>max</c> use the AGE agtype comparison aggregates, so numbers,
+    /// strings, booleans, and temporals keep their agtype ordering.</description></item>
+    /// </list>
+    /// </remarks>
+    private static string RenderAggregateCombine(
+        CypherPostAggregate aggregate,
+        string quotedColumn,
+        IReadOnlyList<string> projectionColumns)
+    {
+        switch (aggregate.Function.ToLowerInvariant())
+        {
+            case "sum":
+                return $"sum((age_result.{quotedColumn})::text::numeric)::text::ag_catalog.agtype";
+
+            case "avg":
+                if (aggregate.AuxiliaryColumnIndex is not { } countIndex ||
+                    countIndex < 0 || countIndex >= projectionColumns.Count)
+                {
+                    throw new GraphException(
+                        "AGE average post-processing requires a partial-count column.");
+                }
+
+                var quotedCount = AgeSqlIdentifier.Quote(
+                    projectionColumns[countIndex],
+                    "projection column");
+                return "(" +
+                    $"sum((age_result.{quotedColumn})::text::numeric) / " +
+                    $"NULLIF(sum((age_result.{quotedCount})::text::numeric), 0)" +
+                    ")::text::ag_catalog.agtype";
+
+            case "min":
+                return $"ag_catalog.age_min(age_result.{quotedColumn})";
+
+            case "max":
+                return $"ag_catalog.age_max(age_result.{quotedColumn})";
+
+            default:
+                throw new GraphException(
+                    $"AGE post-processing does not support aggregate merge '{aggregate.Function}'.");
+        }
     }
 
     /// <summary>Normalizes a command for query-shape tests.</summary>

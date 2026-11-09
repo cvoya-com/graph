@@ -80,6 +80,78 @@ public sealed class AgeQueryRunnerTests
     }
 
     [Fact]
+    public void BuildCommandText_CombinesPartialAverageWithCount()
+    {
+        const string cypher =
+            "MATCH (src:A) WITH src.Status AS k, sum(src.Amount) AS s, " +
+            "count(src.Amount) AS c RETURN k AS Key, s AS Average, c AS c\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B) WITH src.Status AS k, sum(src.Amount) AS s, " +
+            "count(src.Amount) AS c RETURN k AS Key, s AS Average, c AS c";
+
+        var postProcessing = new CypherPostProcessing(
+            Sort: [],
+            Skip: null,
+            Limit: null,
+            ResultColumnCount: 2,
+            Aggregation: new CypherPostAggregation(
+                [0],
+                [new CypherPostAggregate(1, "avg", AuxiliaryColumnIndex: 2)]));
+
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            cypher,
+            ["Key", "Average", "c"],
+            postProcessing);
+
+        Assert.Contains(
+            "(sum((age_result.\"Average\")::text::numeric) / " +
+            "NULLIF(sum((age_result.\"c\")::text::numeric), 0))::text::ag_catalog.agtype AS \"Average\"",
+            sql,
+            StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_CombinesMinMaxWithAgtypeComparison()
+    {
+        const string cypher =
+            "MATCH (src:A) WITH src.Status AS k, min(src.Amount) AS n, max(src.Amount) AS x " +
+            "RETURN k AS Key, n AS Minimum, x AS Maximum\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B) WITH src.Status AS k, min(src.Amount) AS n, max(src.Amount) AS x " +
+            "RETURN k AS Key, n AS Minimum, x AS Maximum";
+
+        var postProcessing = new CypherPostProcessing(
+            Sort: [],
+            Skip: null,
+            Limit: null,
+            ResultColumnCount: 3,
+            Aggregation: new CypherPostAggregation(
+                [0],
+                [
+                    new CypherPostAggregate(1, "min"),
+                    new CypherPostAggregate(2, "max"),
+                ]));
+
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            cypher,
+            ["Key", "Minimum", "Maximum"],
+            postProcessing);
+
+        Assert.Contains(
+            "ag_catalog.age_min(age_result.\"Minimum\") AS \"Minimum\"",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ag_catalog.age_max(age_result.\"Maximum\") AS \"Maximum\"",
+            sql,
+            StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildCommandText_DeduplicatesDistinctProjection()
     {
         var postProcessing = new CypherPostProcessing(

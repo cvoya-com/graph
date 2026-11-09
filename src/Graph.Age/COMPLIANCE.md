@@ -79,19 +79,27 @@ node hydration into typed optional matches, list comprehensions, and collection 
 entity pass applies AGE compatibility lowering. `AgeSetOperationProjectionPass` assigns every leaf
 projection one compatible alias shape before rendering. `AgeUnionAllExpansionPass` expands a
 logical label hierarchy into one single-label branch per physical label. When the statement also
-carries global ordering, paging, `DISTINCT`, or an additive aggregate, AGE cannot express the
+carries global ordering, paging, `DISTINCT`, or a mergeable aggregate, AGE cannot express the
 global clause after a `UNION` (it attaches `ORDER BY`/`SKIP`/`LIMIT` to the final branch) and
 cannot execute a `CALL { }` wrapper. The pass therefore lifts that row shaping into
 `CypherStatement.PostProcessing`, and `AgeQueryRunner` applies it as a structured SQL wrapper
 around `cypher()`: the wrapper orders and pages the combined rows, deduplicates with
-`SELECT DISTINCT` when no ordering is present, and merges per-branch `count`/`sum` partials with
-`sum`. No rendered Cypher is textually rewritten; the wrapper only composes validated identifiers,
-sort columns, and integer paging values around the rendered statement.
+`SELECT DISTINCT` when no ordering is present, and merges per-branch partials. `count`/`sum`
+merge with `sum`, `average` merges a partial sum with a partial non-null count, and `min`/`max`
+merge with AGE's type-aware `age_min`/`age_max` comparison aggregates. A complex-property
+projection whose `collect` stage precedes the paging tail instead receives a per-branch
+`skip + limit` page before the property match, so only the candidate page is grouped. No rendered
+Cypher is textually rewritten; the wrapper only composes validated identifiers, sort columns, and
+integer paging values around the rendered statement.
 
 Scalar-key grouped aggregation needs no AGE-specific grouping pass: the shared planner emits a
 structured `WITH` stage whose non-aggregate key establishes AGE's implicit group, with aggregate
 columns for `Count`, `Sum`, `Average`, `Min`, and `Max`; key-only projections use `WITH DISTINCT`.
-The normal AGE label, alias, and empty-sum passes operate on that AST before rendering. Unsupported
+The normal AGE label, alias, and empty-sum passes operate on that AST before rendering. When the
+grouped node type has registered physical subtypes, the same `AgeUnionAllExpansionPass` expands
+the grouping into one branch per label table and merges the partial aggregates; `collect`,
+percentile, and standard-deviation aggregates retain the containment fallback because their
+partial values are not losslessly mergeable without additional type metadata. Unsupported
 grouping shapes retain the provider-neutral validation message and fail before execution.
 
 ## Atomic subgraph creation

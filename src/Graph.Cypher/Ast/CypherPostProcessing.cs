@@ -36,5 +36,15 @@ internal sealed record CypherPostAggregation(
 
 /// <summary>Combines one partial aggregate projection column.</summary>
 /// <param name="ColumnIndex">Zero-based index into the rendered projection columns.</param>
-/// <param name="Function">The combining function name, for example <c>sum</c>.</param>
-internal sealed record CypherPostAggregate(int ColumnIndex, string Function);
+/// <param name="Function">
+/// The combining function name. <c>sum</c> adds partial counts/sums, <c>avg</c> combines a partial
+/// sum with a partial count, and <c>min</c>/<c>max</c> compare agtype values.
+/// </param>
+/// <param name="AuxiliaryColumnIndex">
+/// Zero-based index of the partial-count column that an <c>avg</c> merge needs, or
+/// <see langword="null"/> for the other functions.
+/// </param>
+internal sealed record CypherPostAggregate(
+    int ColumnIndex,
+    string Function,
+    int? AuxiliaryColumnIndex = null);

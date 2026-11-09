@@ -122,7 +122,7 @@ public sealed class AgeLabelPatternPassTests
         // disjoint and the provider may sum them into one value without double counting.
         Assert.Contains("MATCH (v:CountContract)", rendered.Text, StringComparison.Ordinal);
         Assert.Contains("MATCH (v:CountKaufvertrag)", rendered.Text, StringComparison.Ordinal);
-        Assert.Contains("RETURN count(v)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("RETURN count(1)", rendered.Text, StringComparison.Ordinal);
         Assert.Equal(1, rendered.Text.Split("UNION ALL", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("inheritance_labels", rendered.Text, StringComparison.Ordinal);
     }
@@ -566,14 +566,14 @@ public sealed class AgeLabelPatternPassTests
     [Fact]
     public void KeepsFallbackForAggregatesWithoutLosslessMerge()
     {
-        AgeTypeHierarchyRegistry.Instance.Register("AverageContract", "AverageKaufvertrag");
+        AgeTypeHierarchyRegistry.Instance.Register("CollectContract", "CollectKaufvertrag");
 
         var statement = Statement(
-            Match(optional: false, new NodePattern("src", ["AverageContract"])),
+            Match(optional: false, new NodePattern("src", ["CollectContract"])),
             new WithClause(
                 [
                     new ReturnItem(new PropertyAccess(new VariableRef("src"), "Status"), "__key"),
-                    new ReturnItem(new FunctionCall("avg", [new VariableRef("src")]), "__a0"),
+                    new ReturnItem(new FunctionCall("collect", [new VariableRef("src")]), "__a0"),
                 ],
                 distinct: false),
             new ReturnClause(
@@ -588,9 +588,96 @@ public sealed class AgeLabelPatternPassTests
         Assert.DoesNotContain("UNION ALL", rendered.Text, StringComparison.Ordinal);
         Assert.Contains("MATCH (src)", rendered.Text, StringComparison.Ordinal);
         Assert.Contains(
-            "properties(src) @> { inheritance_labels: ['AverageContract'] }",
+            "properties(src) @> { inheritance_labels: ['CollectContract'] }",
             rendered.Text,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExpandsAverageIntoPartialSumAndCount()
+    {
+        AgeTypeHierarchyRegistry.Instance.Register("AverageContract", "AverageKaufvertrag");
+
+        var statement = Statement(
+            Match(optional: false, new NodePattern("src", ["AverageContract"])),
+            new WithClause(
+                [
+                    new ReturnItem(new PropertyAccess(new VariableRef("src"), "Status"), "__key"),
+                    new ReturnItem(
+                        new FunctionCall("avg", [new PropertyAccess(new VariableRef("src"), "Amount")]),
+                        "__a0"),
+                ],
+                distinct: false),
+            new ReturnClause(
+                [
+                    new ReturnItem(new VariableRef("__key"), "Key"),
+                    new ReturnItem(new VariableRef("__a0"), "Average"),
+                ],
+                distinct: false));
+
+        var lowered = expansion.Run(pass.Run(statement));
+        var rendered = renderer.Render(lowered);
+
+        Assert.Contains("UNION ALL", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "WITH src.`Status` AS __key, sum(src.Amount) AS __a0, " +
+            "count(src.Amount) AS __age_union_avg_count0",
+            rendered.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "RETURN __key AS Key, __a0 AS Average, " +
+            "__age_union_avg_count0 AS __age_union_avg_count0",
+            rendered.Text,
+            StringComparison.Ordinal);
+
+        var postProcessing = Assert.IsType<CypherPostProcessing>(lowered.PostProcessing);
+        var aggregation = Assert.IsType<CypherPostAggregation>(postProcessing.Aggregation);
+        var aggregate = Assert.Single(aggregation.Aggregates);
+        Assert.Equal(1, aggregate.ColumnIndex);
+        Assert.Equal("avg", aggregate.Function);
+        Assert.Equal(2, aggregate.AuxiliaryColumnIndex);
+    }
+
+    [Fact]
+    public void ExpandsMinAndMaxWithAgtypeComparison()
+    {
+        AgeTypeHierarchyRegistry.Instance.Register("RangeContract", "RangeKaufvertrag");
+
+        var statement = Statement(
+            Match(optional: false, new NodePattern("src", ["RangeContract"])),
+            new WithClause(
+                [
+                    new ReturnItem(new PropertyAccess(new VariableRef("src"), "Status"), "__key"),
+                    new ReturnItem(
+                        new FunctionCall("min", [new PropertyAccess(new VariableRef("src"), "Amount")]),
+                        "__a0"),
+                    new ReturnItem(
+                        new FunctionCall("max", [new PropertyAccess(new VariableRef("src"), "Amount")]),
+                        "__a1"),
+                ],
+                distinct: false),
+            new ReturnClause(
+                [
+                    new ReturnItem(new VariableRef("__key"), "Key"),
+                    new ReturnItem(new VariableRef("__a0"), "Minimum"),
+                    new ReturnItem(new VariableRef("__a1"), "Maximum"),
+                ],
+                distinct: false));
+
+        var lowered = expansion.Run(pass.Run(statement));
+        var rendered = renderer.Render(lowered);
+
+        Assert.Contains("UNION ALL", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("min(src.Amount) AS __a0", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("max(src.Amount) AS __a1", rendered.Text, StringComparison.Ordinal);
+
+        var postProcessing = Assert.IsType<CypherPostProcessing>(lowered.PostProcessing);
+        var aggregation = Assert.IsType<CypherPostAggregation>(postProcessing.Aggregation);
+        Assert.Equal(
+            [("min", 1), ("max", 2)],
+            aggregation.Aggregates
+                .Select(aggregate => (aggregate.Function, aggregate.ColumnIndex))
+                .ToArray());
     }
 
     [Fact]

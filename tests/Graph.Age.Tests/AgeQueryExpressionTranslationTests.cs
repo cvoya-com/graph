@@ -85,7 +85,7 @@ public sealed class AgeQueryExpressionTranslationTests
         Assert.Contains("MATCH (src:Animal)", translated.Text, StringComparison.Ordinal);
         Assert.Contains("MATCH (src:Dog)", translated.Text, StringComparison.Ordinal);
         Assert.Contains("MATCH (src:PoliceDog)", translated.Text, StringComparison.Ordinal);
-        Assert.Contains("RETURN count(src)", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("RETURN count(1)", translated.Text, StringComparison.Ordinal);
         Assert.Equal(2, translated.Text.Split("UNION ALL", StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain("inheritance_labels", translated.Text, StringComparison.Ordinal);
         Assert.True(translated.SumUnionCountBranches);

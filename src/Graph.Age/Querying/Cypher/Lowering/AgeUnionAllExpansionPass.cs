@@ -35,10 +35,12 @@ using Cvoya.Graph.Cypher.Validation;
 /// </para>
 /// <para>
 /// Expansion is skipped when per-branch evaluation would change the result in a way the wrapper
-/// cannot repair: optional matches, scoped CALL subqueries, multiple expandable nodes, grouping
-/// stages other than the final aggregate, and aggregates that cannot be merged additively. A lone
-/// global <c>count(...)</c> is the additive special case: per-label counts are summed by the
-/// wrapper, and the provider also collapses raw union-count rows for compatibility.
+/// cannot repair: optional matches, scoped CALL subqueries, multiple expandable nodes, and grouping
+/// stages other than the final aggregate. Partial aggregate rows are merged by the wrapper for
+/// <c>count</c>/<c>sum</c> (sum), <c>avg</c> (weighted sum/count), and <c>min</c>/<c>max</c>
+/// (agtype comparison). A lone global <c>count(...)</c> is the additive special case: per-label
+/// counts are summed by the wrapper, and the provider also collapses raw union-count rows for
+/// compatibility.
 /// </para>
 /// </remarks>
 internal sealed class AgeUnionAllExpansionPass : ICypherPass
@@ -59,12 +61,7 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
         "sum",
     };
 
-    /// <summary>Aggregate functions whose partial results combine by summation.</summary>
-    private static readonly HashSet<string> AdditiveAggregateFunctions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "count",
-        "sum",
-    };
+    private const string AverageCountColumnPrefix = "__age_union_avg_count";
 
     /// <inheritdoc />
     public CypherStatement Run(CypherStatement input)
@@ -558,9 +555,10 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
         }
 
         var spanningAggregation = HasSpanningAggregation(body, target.Alias);
-        var aggregation = TryBuildAggregation(body, target.Alias, out var aggregationPlan)
-            ? aggregationPlan
+        var aggregationPlan = TryBuildAggregation(body, target.Alias, out var plan)
+            ? plan
             : null;
+        var aggregation = aggregationPlan?.Post;
         if (spanningAggregation && aggregation is null)
         {
             return clauses.ToArray();
@@ -578,8 +576,24 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
         }
 
         var resultColumnCount = finalReturn.Items.Count;
+        var branchBody = aggregationPlan?.Body ?? body;
+
+        // A complex-property projection groups its rows behind a `collect` stage. Apply the page
+        // before that stage so only the candidate page traverses the property relationships.
+        var pagingPushed = false;
+        if (orderBy is not null && limit is not null && aggregation is null && !distinct)
+        {
+            branchBody = TryPushComplexPropertyPaging(
+                branchBody,
+                target.Alias,
+                orderBy,
+                skip,
+                limit,
+                out pagingPushed);
+        }
+
         var branches = alternatives
-            .Select(label => RewriteBranch(body, target.Alias, label))
+            .Select(label => RewriteBranch(branchBody, target.Alias, label))
             .ToArray();
 
         var sortColumns = new List<CypherPostSort>();
@@ -609,7 +623,7 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             }
         }
 
-        if (orderBy is not null && aggregation is null && limit is not null)
+        if (orderBy is not null && aggregation is null && limit is not null && !pagingPushed)
         {
             // Per-branch top-N: the wrapper still merges and re-orders the combined rows, but
             // bounding each branch lets an index on the ordering property satisfy the sort and
@@ -711,15 +725,21 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             AggregationSpansBranches(@return.Items, alias));
 
     /// <summary>
-    /// Builds the plan that merges per-branch partial aggregate rows. Only additive aggregates
-    /// (<c>count</c> and <c>sum</c>) have a lossless merge without shipping every row back.
+    /// Builds the plan that merges per-branch partial aggregate rows and rewrites branches whose
+    /// aggregate needs more than one partial column.
     /// </summary>
+    /// <remarks>
+    /// <c>count</c>/<c>sum</c> merge by summation, <c>min</c>/<c>max</c> by AGE's type-aware agtype
+    /// comparison, and <c>avg</c> by a weighted sum/count pair. The <c>avg</c> rewrite replaces the
+    /// per-branch average with <c>sum</c> and appends a <c>count</c> column to the branch
+    /// projection; the wrapper reads both columns and returns the average.
+    /// </remarks>
     private static bool TryBuildAggregation(
         IReadOnlyList<ICypherClause> body,
         string alias,
-        out CypherPostAggregation? aggregation)
+        out AggregationPlan? plan)
     {
-        aggregation = null;
+        plan = null;
 
         var projection = body.OfType<ReturnClause>().LastOrDefault();
         if (projection is null)
@@ -727,23 +747,49 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             return false;
         }
 
-        var groupingStage = body
-            .OfType<WithClause>()
-            .LastOrDefault(with => !with.Wildcard && with.Items.Any(item => ContainsAggregate(item.Expression)));
+        var projectionIndex = -1;
+        var groupingStageIndex = -1;
+        WithClause? groupingStage = null;
+        for (var index = body.Count - 1; index >= 0; index--)
+        {
+            if (body[index] is ReturnClause && projectionIndex < 0)
+            {
+                projectionIndex = index;
+            }
+
+            if (body[index] is WithClause with &&
+                !with.Wildcard &&
+                with.Items.Any(item => ContainsAggregate(item.Expression)))
+            {
+                groupingStage = with;
+                groupingStageIndex = index;
+                break;
+            }
+        }
+
+        if (projectionIndex < 0)
+        {
+            return false;
+        }
+
+        var originalProjectionCount = projection.Items.Count;
+        var extraOrdinal = 0;
 
         if (groupingStage is not null)
         {
-            if (groupingStage.Distinct ||
-                !AggregationSpansBranches(groupingStage.Items, alias))
+            var spansBranches = AggregationSpansBranches(groupingStage.Items, alias);
+            if (groupingStage.Distinct || !spansBranches)
             {
                 // Either the stage is not a mergeable aggregate, or its groups are disjoint per
                 // branch and the plain union is already exact.
-                return !AggregationSpansBranches(groupingStage.Items, alias);
+                return !spansBranches;
             }
 
             var groups = new List<int>();
             var aggregates = new List<CypherPostAggregate>();
-            for (var index = 0; index < projection.Items.Count; index++)
+            var groupingItems = groupingStage.Items.ToList();
+            var projectionItems = projection.Items.ToList();
+            for (var index = 0; index < originalProjectionCount; index++)
             {
                 if (projection.Items[index].Expression is not VariableRef reference)
                 {
@@ -759,12 +805,37 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
                 var source = groupingStage.Items[sourceIndex];
                 if (ContainsAggregate(source.Expression))
                 {
-                    if (!TryCombineAggregate(source.Expression, out var function))
+                    if (!TryCombineAggregate(
+                            source.Expression,
+                            out var function,
+                            out var argument))
                     {
                         return false;
                     }
 
-                    aggregates.Add(new CypherPostAggregate(index, function));
+                    if (string.Equals(function, "avg", StringComparison.OrdinalIgnoreCase) &&
+                        argument is not null)
+                    {
+                        var countAlias = $"{AverageCountColumnPrefix}{extraOrdinal}";
+                        groupingItems[sourceIndex] = new ReturnItem(
+                            new FunctionCall("sum", [argument]),
+                            source.Alias);
+                        groupingItems.Add(new ReturnItem(
+                            new FunctionCall("count", [argument]),
+                            countAlias));
+                        projectionItems.Add(new ReturnItem(
+                            new VariableRef(countAlias),
+                            countAlias));
+                        aggregates.Add(new CypherPostAggregate(
+                            index,
+                            "avg",
+                            originalProjectionCount + extraOrdinal));
+                        extraOrdinal++;
+                    }
+                    else
+                    {
+                        aggregates.Add(new CypherPostAggregate(index, function));
+                    }
                 }
                 else
                 {
@@ -777,7 +848,12 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
                 return false;
             }
 
-            aggregation = new CypherPostAggregation(groups, aggregates);
+            var rewritten = body.ToArray();
+            rewritten[groupingStageIndex] = new WithClause(groupingItems, groupingStage.Distinct);
+            rewritten[projectionIndex] = new ReturnClause(projectionItems, projection.Distinct);
+            plan = new AggregationPlan(
+                new CypherPostAggregation(groups, aggregates),
+                rewritten);
             return true;
         }
 
@@ -790,17 +866,37 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
 
         var directGroups = new List<int>();
         var directAggregates = new List<CypherPostAggregate>();
-        for (var index = 0; index < projection.Items.Count; index++)
+        var directItems = projection.Items.ToList();
+        for (var index = 0; index < originalProjectionCount; index++)
         {
             var expression = projection.Items[index].Expression;
             if (ContainsAggregate(expression))
             {
-                if (!TryCombineAggregate(expression, out var function))
+                if (!TryCombineAggregate(expression, out var function, out var argument))
                 {
                     return false;
                 }
 
-                directAggregates.Add(new CypherPostAggregate(index, function));
+                if (string.Equals(function, "avg", StringComparison.OrdinalIgnoreCase) &&
+                    argument is not null)
+                {
+                    var countAlias = $"{AverageCountColumnPrefix}{extraOrdinal}";
+                    directItems[index] = new ReturnItem(
+                        new FunctionCall("sum", [argument]),
+                        projection.Items[index].Alias);
+                    directItems.Add(new ReturnItem(
+                        new FunctionCall("count", [argument]),
+                        countAlias));
+                    directAggregates.Add(new CypherPostAggregate(
+                        index,
+                        "avg",
+                        originalProjectionCount + extraOrdinal));
+                    extraOrdinal++;
+                }
+                else
+                {
+                    directAggregates.Add(new CypherPostAggregate(index, function));
+                }
             }
             else
             {
@@ -813,7 +909,11 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             return false;
         }
 
-        aggregation = new CypherPostAggregation(directGroups, directAggregates);
+        var rewrittenDirect = body.ToArray();
+        rewrittenDirect[projectionIndex] = new ReturnClause(directItems, projection.Distinct);
+        plan = new AggregationPlan(
+            new CypherPostAggregation(directGroups, directAggregates),
+            rewrittenDirect);
         return true;
     }
 
@@ -830,33 +930,320 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
         return -1;
     }
 
-    private static bool TryCombineAggregate(CypherExpression expression, out string function)
+    private static bool TryCombineAggregate(
+        CypherExpression expression,
+        out string function,
+        out CypherExpression? argument)
     {
-        if (expression is FunctionCall call && AdditiveAggregateFunctions.Contains(call.Name))
+        argument = null;
+        if (expression is not FunctionCall call)
         {
-            function = "sum";
-            return true;
+            function = string.Empty;
+            return false;
         }
 
-        function = string.Empty;
-        return false;
+        switch (call.Name.ToLowerInvariant())
+        {
+            case "count":
+            case "sum":
+                function = "sum";
+                return true;
+
+            // The planner wraps a group sum in `coalesce(sum(...), 0)`. Partial sums still add:
+            // an empty branch contributes its zero, and an all-null branch contributes nothing.
+            case "coalesce"
+                when call.Arguments.Count >= 1 &&
+                     call.Arguments[0] is FunctionCall
+                     {
+                         Name: "count" or "Count" or "sum" or "Sum",
+                     }:
+                function = "sum";
+                return true;
+
+            case "avg" when call.Arguments.Count == 1:
+                function = "avg";
+                argument = call.Arguments[0];
+                return true;
+
+            case "min":
+                function = "min";
+                return true;
+
+            case "max":
+                function = "max";
+                return true;
+
+            default:
+                // `collect`, percentile*, and stDev* need a value-order or percentile accumulator
+                // that the SQL wrapper cannot reproduce for every agtype shape. Keep them on the
+                // containment fallback.
+                function = string.Empty;
+                return false;
+        }
     }
 
     private static ICypherClause[] RewriteBranch(
-        IReadOnlyList<ICypherClause> clauses,
+        ICypherClause[] clauses,
         string alias,
         string physicalLabel)
     {
-        var rewritten = new ICypherClause[clauses.Count];
-        for (var index = 0; index < clauses.Count; index++)
+        var rewritten = new ICypherClause[clauses.Length];
+        for (var index = 0; index < clauses.Length; index++)
         {
-            rewritten[index] = clauses[index] is MatchClause match
+            var clause = clauses[index] is MatchClause match
                 ? RewriteMatch(match, alias, physicalLabel)
                 : clauses[index];
+            rewritten[index] = RewriteCountOfExpandedNode(clause, alias);
         }
 
         return rewritten;
     }
+
+    /// <summary>
+    /// Replaces <c>count(expandedNode)</c> with <c>count(1)</c>. A node in a required match is
+    /// never null, so this is the same value but lets AGE count rows without materializing every
+    /// vertex value.
+    /// </summary>
+    private static ICypherClause RewriteCountOfExpandedNode(ICypherClause clause, string alias) =>
+        clause switch
+        {
+            WithClause with => new WithClause(
+                RewriteCountItems(with.Items, alias),
+                with.Distinct),
+            ReturnClause @return => new ReturnClause(
+                RewriteCountItems(@return.Items, alias),
+                @return.Distinct),
+            _ => clause,
+        };
+
+    private static ReturnItem[] RewriteCountItems(
+        IReadOnlyList<ReturnItem> items,
+        string alias) =>
+        items.Select(item =>
+        {
+            if (item.Expression is FunctionCall function &&
+                string.Equals(function.Name, "count", StringComparison.OrdinalIgnoreCase) &&
+                function.Arguments is [VariableRef variable] &&
+                string.Equals(variable.Alias, alias, StringComparison.Ordinal))
+            {
+                return new ReturnItem(
+                    new FunctionCall("count", [new Literal(1)]),
+                    item.Alias);
+            }
+
+            return item;
+        }).ToArray();
+
+    /// <summary>
+    /// Applies the lifted ordering and paging before the complex-property <c>collect</c> stage.
+    /// </summary>
+    /// <remarks>
+    /// The entity projection lowers a complex-property load into
+    /// <c>OPTIONAL MATCH (owner)-[rels*..]-&gt;(prop) … WITH owner, collect(propertyPath)</c>. The
+    /// final ordering and paging then run after that collect, so every branch groups all of its
+    /// owners before discarding all but the page. Bounding each branch to
+    /// <c>skip + limit</c> rows before the property match is safe for the same reason as the
+    /// ordinary per-branch top-N: the global page is a subset of each branch's top
+    /// <c>skip + limit</c> rows.
+    /// </remarks>
+    private static ICypherClause[] TryPushComplexPropertyPaging(
+        IReadOnlyList<ICypherClause> body,
+        string alias,
+        OrderByClause orderBy,
+        int? skip,
+        int? limit,
+        out bool pushed)
+    {
+        pushed = false;
+        if (limit is null)
+        {
+            return body.ToArray();
+        }
+
+        var loadIndex = FindComplexPropertyLoadIndex(body, alias);
+        if (loadIndex <= 0)
+        {
+            return body.ToArray();
+        }
+
+        var inScope = CollectAliasesInScope(body, loadIndex);
+        if (inScope.Count == 0)
+        {
+            return body.ToArray();
+        }
+
+        var scope = inScope.ToHashSet(StringComparer.Ordinal);
+        if (!orderBy.Items.All(item => IsOrderExpressionEvaluable(item.Expression, scope)))
+        {
+            return body.ToArray();
+        }
+
+        // A pre-paging pipe is only exact when it still runs on individual owner rows. If an
+        // earlier WITH already aggregated, the lifted tail pages groups, not owners.
+        if (body.Take(loadIndex).OfType<WithClause>().Any(with =>
+                with.Items.Any(item => ContainsAggregate(item.Expression))) ||
+            body.Take(loadIndex).OfType<OrderByClause>().Any())
+        {
+            return body.ToArray();
+        }
+
+        var branchLimit = (long)(skip ?? 0) + limit.Value;
+        var paging = new ICypherClause[]
+        {
+            new WithClause(
+                inScope.Select(name => new ReturnItem(new VariableRef(name), null)).ToArray(),
+                distinct: false),
+            orderBy,
+            new LimitClause(new Literal((int)Math.Min(branchLimit, int.MaxValue))),
+        };
+
+        pushed = true;
+        return
+        [
+            .. body.Take(loadIndex),
+            .. paging,
+            .. body.Skip(loadIndex),
+        ];
+    }
+
+    private static int FindComplexPropertyLoadIndex(
+        IReadOnlyList<ICypherClause> clauses,
+        string alias)
+    {
+        for (var index = 0; index + 1 < clauses.Count; index++)
+        {
+            if (clauses[index] is not MatchClause { Optional: true } match ||
+                clauses[index + 1] is not WhereClause where ||
+                !MatchReferencesAlias(match, alias) ||
+                !ContainsComplexPropertyMarker(where.Predicate))
+            {
+                continue;
+            }
+
+            return index;
+        }
+
+        return -1;
+    }
+
+    private static bool MatchReferencesAlias(MatchClause match, string alias) =>
+        match.Patterns
+            .SelectMany(pattern => pattern.Elements)
+            .OfType<NodePattern>()
+            .Any(node => string.Equals(node.Alias, alias, StringComparison.Ordinal));
+
+    private static bool ContainsComplexPropertyMarker(CypherExpression expression) =>
+        expression switch
+        {
+            PropertyAccess property =>
+                string.Equals(
+                    property.Property,
+                    AgeDialect.Instance.ComplexPropertyRelationshipMarker,
+                    StringComparison.Ordinal) ||
+                ContainsComplexPropertyMarker(property.Target),
+            EscapedPropertyAccess property => ContainsComplexPropertyMarker(property.Target),
+            PhysicalPropertyAccess property => ContainsComplexPropertyMarker(property.Target),
+            BinaryExpression binary =>
+                ContainsComplexPropertyMarker(binary.Left) ||
+                ContainsComplexPropertyMarker(binary.Right),
+            UnaryExpression unary => ContainsComplexPropertyMarker(unary.Operand),
+            AllExpression all =>
+                ContainsComplexPropertyMarker(all.Source) ||
+                ContainsComplexPropertyMarker(all.Predicate),
+            ConjunctionExpression conjunction =>
+                conjunction.Predicates.Any(ContainsComplexPropertyMarker),
+            FunctionCall function =>
+                function.Arguments.Any(ContainsComplexPropertyMarker),
+            _ => false,
+        };
+
+    private static List<string> CollectAliasesInScope(
+        IReadOnlyList<ICypherClause> clauses,
+        int end)
+    {
+        var aliases = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Add(string? alias)
+        {
+            if (!string.IsNullOrEmpty(alias) && seen.Add(alias))
+            {
+                aliases.Add(alias);
+            }
+        }
+
+        for (var index = 0; index < end; index++)
+        {
+            switch (clauses[index])
+            {
+                case MatchClause match:
+                    foreach (var pattern in match.Patterns)
+                    {
+                        Add(pattern.Alias);
+                        foreach (var element in pattern.Elements)
+                        {
+                            switch (element)
+                            {
+                                case NodePattern node:
+                                    Add(node.Alias);
+                                    break;
+
+                                case RelationshipPattern relationship:
+                                    Add(relationship.Alias);
+                                    break;
+                            }
+                        }
+                    }
+
+                    break;
+
+                case WithClause with:
+                    foreach (var item in with.Items)
+                    {
+                        if (item.Alias is not null)
+                        {
+                            Add(item.Alias);
+                        }
+                        else if (item.Expression is VariableRef variable)
+                        {
+                            Add(variable.Alias);
+                        }
+                    }
+
+                    break;
+
+                case UnwindClause unwind:
+                    Add(unwind.Alias);
+                    break;
+
+                case CallSubqueryClause subquery:
+                    foreach (var imported in subquery.ImportedVariables)
+                    {
+                        Add(imported);
+                    }
+
+                    break;
+            }
+        }
+
+        return aliases;
+    }
+
+    private static bool IsOrderExpressionEvaluable(
+        CypherExpression expression,
+        IReadOnlySet<string> aliases) =>
+        expression switch
+        {
+            VariableRef variable => aliases.Contains(variable.Alias),
+            PropertyAccess property => IsOrderExpressionEvaluable(property.Target, aliases),
+            EscapedPropertyAccess property => IsOrderExpressionEvaluable(property.Target, aliases),
+            PhysicalPropertyAccess property => IsOrderExpressionEvaluable(property.Target, aliases),
+            _ => false,
+        };
+
+    private sealed record AggregationPlan(
+        CypherPostAggregation Post,
+        ICypherClause[] Body);
 
     private static MatchClause RewriteMatch(MatchClause match, string alias, string physicalLabel)
     {

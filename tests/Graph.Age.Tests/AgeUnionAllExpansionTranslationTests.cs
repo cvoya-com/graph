@@ -6,7 +6,11 @@ namespace Cvoya.Graph.Age.Tests;
 using Cvoya.Graph.Age.Querying;
 using Cvoya.Graph.Age.Querying.Cypher;
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
+using Cvoya.Graph.Age.Querying.Cypher.Lowering;
 using Cvoya.Graph.Age.Querying.Cypher.Visitors.Core;
+using Cvoya.Graph.Cypher;
+using Cvoya.Graph.Cypher.Ast;
+using Cvoya.Graph.Cypher.Ast.Expressions;
 
 public sealed class AgeUnionAllExpansionTranslationTests
 {
@@ -73,6 +77,44 @@ public sealed class AgeUnionAllExpansionTranslationTests
     }
 
     [Fact]
+    public void PushesPagingBeforeComplexPropertyCollect()
+    {
+        AgeTypeHierarchyRegistry.Instance.Register("Nul68Complex", "Nul68ComplexChild");
+
+        var statement = new CypherStatement(
+            [
+                new MatchClause(
+                    [new PathPattern([new NodePattern("src", ["Nul68Complex"])])],
+                    optional: false),
+                new EntityProjectionClause(
+                    EntityProjectionShape.Node,
+                    "src",
+                    relationshipAlias: null,
+                    targetAlias: null,
+                    loadSourceProperties: true,
+                    loadTargetProperties: false),
+                new OrderByClause(
+                    [new OrderByItem(new PropertyAccess(new VariableRef("src"), "Name"), descending: false)]),
+                new SkipClause(new Literal(1_000)),
+                new LimitClause(new Literal(100)),
+            ],
+            new Dictionary<string, object?>());
+
+        var projected = new AgeEntityProjectionPass().Run(statement);
+        var expanded = new AgeUnionAllExpansionPass().Run(projected);
+        var rendered = new CypherRenderer(AgeDialect.Instance).Render(expanded);
+
+        var page = rendered.Text.IndexOf("LIMIT 1100", StringComparison.Ordinal);
+        var propertyMatch = rendered.Text.IndexOf("OPTIONAL MATCH", StringComparison.Ordinal);
+        Assert.True(page >= 0, "the branch page must be rendered");
+        Assert.True(
+            page < propertyMatch,
+            "the branch page must run before the complex-property match and collect");
+        Assert.Equal(2, rendered.Text.Split("LIMIT 1100", StringSplitOptions.None).Length - 1);
+        Assert.Contains("UNION ALL", rendered.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GroupedCountLowersToPartialCountsAndSqlCombine()
     {
         var query = Nodes()
@@ -82,7 +124,7 @@ public sealed class AgeUnionAllExpansionTranslationTests
         var translated = Translate(query.Expression);
         var sql = BuildSql(translated);
 
-        Assert.Contains("count(src) AS __a0", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("count(1) AS __a0", translated.Text, StringComparison.Ordinal);
         Assert.Contains("UNION ALL", translated.Text, StringComparison.Ordinal);
         Assert.Contains("sum((age_result.\"Count\")::text::numeric)::text::ag_catalog.agtype AS \"Count\"", sql, StringComparison.Ordinal);
         Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
