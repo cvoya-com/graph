@@ -62,9 +62,11 @@ matches, preserving zero-count owners without multiplying sibling counts (AGE pa
 and `COUNT { }` but silently matches nothing, so nothing is left for the renderer to emit natively).
 Two correlated shapes have no equivalent staging and are rejected at translation time: a filtered
 nested grouping and multiple ordered collections in one projection. `AgeLabelPatternPass` then removes node labels and
-relationship types from those and other match patterns and adds native `labels()` / `type()` predicates
-with a provider-reserved `inheritance_labels` alternative for mapped names outside AGE's native
-grammar, while excluding provider-owned complex values;
+relationship types from those and other match patterns and adds native `type()` predicates for
+relationships and a GIN-friendly `properties @> { inheritance_labels: [...] }` containment predicate
+for nodes. Every written vertex carries its full logical label chain in `inheritance_labels`, so the
+node fallback does not need a non-indexable `labels()` disjunction; provider-owned complex values are
+still excluded by the marker guard;
 `AgeClauseOrderPass` moves ordering and paging without parsing rendered Cypher (including the
 path-decomposition and aggregate exceptions), while
 `AgeTemporalParameterArithmeticPass` unwraps AGE-unsupported temporal constructors, folds
@@ -75,8 +77,16 @@ named optional paths, `ALL`/`reduce` compatibility, temporal members, string con
 indexes, reserved aliases, and empty sums. `AgeInlineComplexPropertyProjectionPass` expands inline
 node hydration into typed optional matches, list comprehensions, and collection clauses before the
 entity pass applies AGE compatibility lowering. `AgeSetOperationProjectionPass` assigns every leaf
-projection one compatible alias shape before rendering. `AgeQueryRunner` performs no textual
-compatibility rewrites after rendering.
+projection one compatible alias shape before rendering. `AgeUnionAllExpansionPass` expands a
+logical label hierarchy into one single-label branch per physical label. When the statement also
+carries global ordering, paging, `DISTINCT`, or an additive aggregate, AGE cannot express the
+global clause after a `UNION` (it attaches `ORDER BY`/`SKIP`/`LIMIT` to the final branch) and
+cannot execute a `CALL { }` wrapper. The pass therefore lifts that row shaping into
+`CypherStatement.PostProcessing`, and `AgeQueryRunner` applies it as a structured SQL wrapper
+around `cypher()`: the wrapper orders and pages the combined rows, deduplicates with
+`SELECT DISTINCT` when no ordering is present, and merges per-branch `count`/`sum` partials with
+`sum`. No rendered Cypher is textually rewritten; the wrapper only composes validated identifiers,
+sort columns, and integer paging values around the rendered statement.
 
 Scalar-key grouped aggregation needs no AGE-specific grouping pass: the shared planner emits a
 structured `WITH` stage whose non-aggregate key establishes AGE's implicit group, with aggregate

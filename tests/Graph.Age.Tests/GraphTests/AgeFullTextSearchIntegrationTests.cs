@@ -71,9 +71,11 @@ public sealed class AgeFullTextSearchIntegrationTests(AgeHarness harness)
             await using var result = await ((AgeGraphTransaction)transaction).Runner.RunAsync(
                 """
                 CREATE (source:Person)
-                SET source.FirstName = $term, source.LastName = 'External', source.Bio = ''
+                SET source.FirstName = $term, source.LastName = 'External', source.Bio = '',
+                    source.inheritance_labels = ['Person']
                 CREATE (target:Person)
-                SET target.FirstName = 'Endpoint', target.LastName = 'External', target.Bio = ''
+                SET target.FirstName = 'Endpoint', target.LastName = 'External', target.Bio = '',
+                    target.inheritance_labels = ['Person']
                 CREATE (source)-[relationship:WORKS_REALLY_WELL_WITH]->(target)
                 SET relationship.HowWell = $term
                 RETURN true AS created

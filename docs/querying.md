@@ -341,6 +341,14 @@ the reverse order instead of silently moving a label predicate across that bound
 traversal source before traversing instead. Providers that do not declare
 `GraphCapability.LabelFiltering` reject a non-empty label filter during translation.
 
+A typed query such as `graph.Nodes<Document>()` also includes every label in `Document`'s
+inheritance hierarchy. The Apache AGE provider discovers CLR `[Node]` inheritance automatically,
+but labels created at runtime have no CLR type and must be registered with
+`AgeGraphStore.RegisterLabelHierarchy(parentLabel, childLabel)` before the first query. Otherwise
+the provider cannot expand the base-label scan to their physical table; NUL-48 F4 validation reports
+that condition as a warning (or a startup failure in `Fail` mode) instead of silently returning an
+incomplete result.
+
 ## Projection and Results
 
 ### Anonymous Types
@@ -561,7 +569,17 @@ var hasMinors = await graph.Nodes<Person>()
 // Check all match condition
 var allAdults = await graph.Nodes<Person>()
     .AllAsync(p => p.Age >= 18);
+
+// Synchronous terminals translate the same way
+var total = graph.Nodes<Person>().Count();
+var totalAsLong = graph.Nodes<Person>().LongCount();
 ```
+
+`Count`/`LongCount` (and `CountAsync`/`LongCountAsync`) lower to a server-side `count(...)`
+aggregate. Never materialize a query just to count it: `Nodes<T>().ToList().Count` reads and
+deserializes every entity and is not supported for large result sets. When the queried type is a
+base type, the count covers the registered label hierarchy without double counting; the AGE
+provider sums one count per physical label table because each vertex belongs to exactly one table.
 
 ### First, Single, Last
 

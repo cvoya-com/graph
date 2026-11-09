@@ -519,6 +519,13 @@ internal sealed class ExpressionToCypherAstLowerer(
             return complexNull;
         }
 
+        if (node.NodeType == ExpressionType.Equal &&
+            dialect.SupportsPropertyKeyExistence &&
+            TryLowerMissingPropertyComparison(node, aliases, out var missingProperty))
+        {
+            return missingProperty;
+        }
+
         var left = Lower(node.Left, aliases);
         var right = Lower(node.Right, aliases);
 
@@ -874,6 +881,55 @@ internal sealed class ExpressionToCypherAstLowerer(
             ? boundAlias
             : ResolveDefaultAlias(selector.Parameters[0].Type, "src");
         expression = Function(functionName, LowerLambda(selector, selectorAlias, aliases));
+        return true;
+    }
+
+    /// <summary>
+    /// Lowers <c>entity.Property == null</c> to the negated key-existence predicate
+    /// <c>NOT (properties(entity) ? 'Property')</c> for dialects that can index it.
+    /// </summary>
+    /// <remarks>
+    /// The rewrite is deliberately limited to a direct simple property on a typed node or
+    /// relationship. Nested accesses (complex values), map variables, dynamic accessors, and
+    /// <c>!= null</c> keep the provider-neutral <c>IS NULL</c>/<c>IS NOT NULL</c> form: the AGE
+    /// 1.8 GIN operator class returns no rows for a positive <c>?</c> lookup, so only the
+    /// negated form (which PostgreSQL evaluates as a scan) is safe today. Provider-written
+    /// entities omit null properties, making key absence equivalent to a null value.
+    /// </remarks>
+    private bool TryLowerMissingPropertyComparison(
+        LinqBinaryExpression node,
+        IReadOnlyDictionary<ParameterExpression, string> aliases,
+        out CypherExpression expression)
+    {
+        expression = null!;
+        MemberExpression? member = node.Left is MemberExpression leftMember && IsNull(node.Right)
+            ? leftMember
+            : node.Right is MemberExpression rightMember && IsNull(node.Left)
+                ? rightMember
+                : null;
+        if (member is null)
+        {
+            return false;
+        }
+
+        if (member.Expression is not ParameterExpression parameter ||
+            (!typeof(INode).IsAssignableFrom(parameter.Type) && !typeof(IRelationship).IsAssignableFrom(parameter.Type)) ||
+            GraphDataModel.IsComplex(member.Type) ||
+            GraphDataModel.IsCollectionOfComplex(member.Type))
+        {
+            return false;
+        }
+
+        var property = member.Member is PropertyInfo propertyInfo
+            ? Labels.GetLabelFromProperty(propertyInfo)
+            : member.Member.Name;
+        property = dialect.GetPropertyStorageName(property);
+        var target = Lower(parameter, aliases);
+        var keyExists = new AstBinaryExpression(
+            CypherBinaryOperator.PropertyKeyExists,
+            new FunctionCall("properties", [target]),
+            new Literal(property));
+        expression = new AstUnaryExpression(CypherUnaryOperator.Not, keyExists);
         return true;
     }
 

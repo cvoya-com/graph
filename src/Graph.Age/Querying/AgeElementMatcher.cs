@@ -16,18 +16,10 @@ internal static class AgeElementMatcher
 
     internal static CypherExpression NodePredicate(
         CypherExpression target,
-        IReadOnlyList<string> labels) => Alternatives(
-            labels,
-            label => new BinaryExpression(
-                CypherBinaryOperator.Or,
-                new BinaryExpression(
-                    CypherBinaryOperator.In,
-                    new Literal(label),
-                    new FunctionCall("labels", [target])),
-                new BinaryExpression(
-                    CypherBinaryOperator.And,
-                    HierarchyNodePredicate(target),
-                    HierarchyPredicate(target, label))));
+        IReadOnlyList<string> labels) => new BinaryExpression(
+            CypherBinaryOperator.And,
+            HierarchyNodePredicate(target),
+            Alternatives(labels, label => HierarchyPredicate(target, label)));
 
     internal static CypherExpression RelationshipPredicate(
         CypherExpression target,
@@ -59,11 +51,11 @@ internal static class AgeElementMatcher
         $"(size([age_label IN labels({alias}) WHERE age_label = {parameterName}]) > 0 OR " +
         $"((NOT '{SerializationBridge.ComplexNodeLabel}' IN labels({alias}) OR " +
         $"coalesce({alias}.{ComplexPropertyStorage.NodeMarkerProperty}, false) = true) AND " +
-        $"size([age_label IN coalesce({alias}.{InheritanceLabelsProperty}, []) WHERE age_label = {parameterName}]) > 0))";
+        $"{RenderHierarchyPredicate(alias, parameterName)}))";
 
     internal static string RelationshipPredicate(string alias, string parameterName) =>
         $"(type({alias}) = {parameterName} OR " +
-        $"{parameterName} IN coalesce({alias}.{InheritanceLabelsProperty}, []))";
+        $"{RenderHierarchyPredicate(alias, parameterName)})";
 
     internal static string UserRootMatch(string alias, string properties = "")
     {
@@ -103,15 +95,18 @@ internal static class AgeElementMatcher
                 new Literal(true)));
 
     private static BinaryExpression HierarchyPredicate(CypherExpression target, string label) =>
-        new BinaryExpression(
-            CypherBinaryOperator.In,
-            new Literal(label),
-            new FunctionCall(
-                "coalesce",
-                [
-                    new PropertyAccess(target, InheritanceLabelsProperty),
-                    new ListExpression([]),
-                ]));
+        new(
+            CypherBinaryOperator.PropertyContainment,
+            new FunctionCall("properties", [target]),
+            new MapExpression(
+            [
+                new MapEntry(
+                    InheritanceLabelsProperty,
+                    new ListExpression([new Literal(label)])),
+            ]));
+
+    private static string RenderHierarchyPredicate(string target, string valueExpression) =>
+        $"properties({target}) @> {{ {InheritanceLabelsProperty}: [{valueExpression}] }}";
 
     private static BinaryExpression ComplexRelationshipPredicate(CypherExpression target) =>
         new BinaryExpression(

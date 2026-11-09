@@ -27,7 +27,15 @@ public sealed class AgeScalarGroupByTranslationTests
 
         var translated = Translate(query);
 
+        // A grouped aggregate keeps the containment fallback: a key such as LastName can occur
+        // in Person and in a derived label table, so per-label UNION ALL branches would emit
+        // duplicate groups.
         Assert.Contains("MATCH (src)", translated.Text);
+        Assert.Contains(
+            "properties(src) @> { inheritance_labels: ['Person'] }",
+            translated.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("'Person' IN labels(src)", translated.Text, StringComparison.Ordinal);
         Assert.Contains("WHERE", translated.Text);
         Assert.Contains("src.Age >= $p0\nWITH src.LastName AS __key", translated.Text);
         Assert.Contains("count(src) AS __a0", translated.Text);

@@ -16,23 +16,49 @@ internal sealed class AgeLabelPatternPass : ICypherPass
 {
     private const string HopAlias = "age_hop";
 
+    private readonly bool hasComplexProperties;
+
+    /// <summary>Initializes a new pass.</summary>
+    /// <param name="hasComplexProperties">
+    /// Whether the registered schema owns any complex property. The owner-isolation predicate only
+    /// exists to keep provider-owned complex value nodes out of label-free matches, so a schema
+    /// without complex properties does not need the correlated owner check.
+    /// </param>
+    public AgeLabelPatternPass(bool hasComplexProperties = true)
+    {
+        this.hasComplexProperties = hasComplexProperties;
+    }
+
     /// <inheritdoc />
     public CypherStatement Run(CypherStatement input)
     {
         ArgumentNullException.ThrowIfNull(input);
 
         var aliasGenerator = new AliasGenerator();
-        var clauses = RewriteClauses(input.Clauses, aliasGenerator, out var changed);
+        var clauses = RewriteClauses(
+            input.Clauses,
+            aliasGenerator,
+            allowExpansion: true,
+            allowPostProcessing: true,
+            out var changed);
         return changed
             ? new CypherStatement(clauses, input.Parameters, input.PathTypes)
             : input;
     }
 
-    private static ICypherClause[] RewriteClauses(
+    private ICypherClause[] RewriteClauses(
         IReadOnlyList<ICypherClause> clauses,
         AliasGenerator aliasGenerator,
+        bool allowExpansion,
+        bool allowPostProcessing,
         out bool changed)
     {
+        // Each linear branch decides for itself, using the same selection as the final
+        // AgeUnionAllExpansionPass. A branch that cannot expand strips its labels and uses the
+        // containment predicate, so a kept label always has a matching expansion.
+        var expansionTarget = allowExpansion
+            ? AgeUnionAllExpansionPass.SelectExpansion(clauses, allowPostProcessing)
+            : null;
         var output = new List<ICypherClause>(clauses.Count);
         changed = false;
 
@@ -40,9 +66,34 @@ internal sealed class AgeLabelPatternPass : ICypherPass
         {
             switch (clauses[index])
             {
+                case SetOperationClause setOperation:
+                    {
+                        var first = RewriteClauses(
+                            setOperation.First,
+                            aliasGenerator,
+                            allowExpansion: true,
+                            allowPostProcessing: false,
+                            out var firstChanged);
+                        var second = RewriteClauses(
+                            setOperation.Second,
+                            aliasGenerator,
+                            allowExpansion: true,
+                            allowPostProcessing: false,
+                            out var secondChanged);
+                        output.Add(firstChanged || secondChanged
+                            ? new SetOperationClause(first, second, setOperation.PreserveDuplicates)
+                            : setOperation);
+                        changed |= firstChanged || secondChanged;
+                        break;
+                    }
+
                 case MatchClause match:
                     {
-                        var rewritten = RewriteMatch(match, aliasGenerator, out var predicates);
+                        var rewritten = RewriteMatch(
+                            match,
+                            aliasGenerator,
+                            expansionTarget?.Alias,
+                            out var predicates);
                         output.Add(rewritten);
                         if (predicates.Count == 0)
                         {
@@ -67,7 +118,12 @@ internal sealed class AgeLabelPatternPass : ICypherPass
 
                 case CallSubqueryClause subquery:
                     {
-                        var body = RewriteClauses(subquery.Body, aliasGenerator, out var bodyChanged);
+                        var body = RewriteClauses(
+                            subquery.Body,
+                            aliasGenerator,
+                            allowExpansion: false,
+                            allowPostProcessing: false,
+                            out var bodyChanged);
                         output.Add(bodyChanged
                             ? new CallSubqueryClause(subquery.ImportedVariables, body)
                             : subquery);
@@ -180,9 +236,10 @@ internal sealed class AgeLabelPatternPass : ICypherPass
             ToInteger(new Literal(0)));
     }
 
-    private static MatchClause RewriteMatch(
+    private MatchClause RewriteMatch(
         MatchClause match,
         AliasGenerator aliasGenerator,
+        string? expansionTargetAlias,
         out List<CypherExpression> predicates)
     {
         var nodePredicates = new List<CypherExpression>();
@@ -200,8 +257,9 @@ internal sealed class AgeLabelPatternPass : ICypherPass
             // declared logical type. Keep the more expensive incoming ownership check for
             // node-only root scans; adding it to optional/lowered traversals would turn their
             // zero-row semantics into another correlated subquery problem.
-            var requiresRootIsolation = !match.Optional &&
+            var allowsNativeLabel = !match.Optional &&
                 !pattern.Elements.OfType<RelationshipPattern>().Any();
+            var requiresRootIsolation = allowsNativeLabel && hasComplexProperties;
             var elements = new PatternElement[pattern.Elements.Count];
             var patternChanged = false;
 
@@ -214,9 +272,51 @@ internal sealed class AgeLabelPatternPass : ICypherPass
                             var alias = node.Alias ?? aliasGenerator.NextNodeAlias();
                             if (node.Labels.Count > 0)
                             {
+                                var isExpansionTarget = string.Equals(
+                                    alias,
+                                    expansionTargetAlias,
+                                    StringComparison.Ordinal);
+                                if (isExpansionTarget)
+                                {
+                                    // Keep the alternatives in MATCH. AgeUnionAllExpansionPass runs
+                                    // last and replaces this pattern with one single-label MATCH per
+                                    // physical label, so no containment predicate is needed. Every
+                                    // AGE vertex has exactly one label and provider value nodes live
+                                    // in the reserved CvoyaNode table, so a typed MATCH cannot return
+                                    // an owned complex value. The root-isolation subquery is therefore
+                                    // redundant here and would cost one correlated check per row.
+                                    elements[elementIndex] = new NodePattern(alias, node.Labels);
+                                    patternChanged = true;
+                                    break;
+                                }
+
+                                if (node.Labels.Count == 1 &&
+                                    allowsNativeLabel &&
+                                    !AgeTypeHierarchyRegistry.Instance.HasSubLabels(node.Labels[0]))
+                                {
+                                    // A node-only leaf type has exactly one physical label table, so
+                                    // the MATCH pattern alone is both complete and index-friendly.
+                                    // Traversals keep the containment fallback because a pattern
+                                    // target can be a provider-owned complex value stored under the
+                                    // reserved CvoyaNode label rather than the logical value label.
+                                    elements[elementIndex] = new NodePattern(
+                                        alias,
+                                        [SerializationBridge.GetRootStorageName(node.Labels[0], relationship: false)]);
+                                    patternChanged = true;
+                                    break;
+                                }
+
+                                // No single union expansion is possible here (for example two
+                                // typed nodes in one query, an OPTIONAL MATCH, or a global
+                                // aggregate). Keep the containment fallback. The planner expands
+                                // one queried type to its type plus every compatible subtype; the
+                                // queried root alone is enough because every compatible vertex
+                                // stores the full logical chain in inheritance_labels. Emitting
+                                // one containment term per subtype would multiply GIN index scans.
+                                var logicalLabels = QueriedLabels(node.Labels);
                                 nodePredicates.Add(AgeElementMatcher.NodePredicate(
                                     new VariableRef(alias),
-                                    node.Labels));
+                                    logicalLabels));
                             }
 
                             if (requiresRootIsolation)
@@ -408,6 +508,23 @@ internal sealed class AgeLabelPatternPass : ICypherPass
             ({ } logical, { } storagePredicate) =>
                 new BinaryExpression(CypherBinaryOperator.And, logical, storagePredicate),
         };
+
+    private static IReadOnlyList<string> QueriedLabels(IReadOnlyList<string> labels)
+    {
+        if (labels.Count <= 1)
+        {
+            return labels;
+        }
+
+        // The planner expands one queried type into its label plus every compatible subtype. If
+        // this list is exactly that expansion, the first entry is the queried root and the
+        // remaining entries are redundant for a containment lookup. A genuine alternative list
+        // (for example two unrelated labels) is not fully covered by the first label and is kept.
+        var compatible = AgeTypeHierarchyRegistry.Instance.GetSubLabels(labels[0]);
+        return labels.All(label => compatible.Contains(label, StringComparer.OrdinalIgnoreCase))
+            ? [labels[0]]
+            : labels;
+    }
 
     private static CypherExpression Conjoin(List<CypherExpression> predicates) =>
         predicates.Count == 1 ? predicates[0] : new ConjunctionExpression(predicates);

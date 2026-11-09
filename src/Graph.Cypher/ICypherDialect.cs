@@ -2,6 +2,7 @@
 // See LICENSE in the project root for full license terms.
 
 using Cvoya.Graph.Cypher.Ast;
+using Cvoya.Graph.Cypher.Ast.Expressions;
 
 namespace Cvoya.Graph.Cypher;
 
@@ -15,6 +16,18 @@ public interface ICypherDialect
 
     /// <summary>Gets the graph features supported by this dialect.</summary>
     CapabilitySet Capabilities { get; }
+
+    /// <summary>
+    /// Gets whether a missing-property comparison can be lowered to a native key-existence
+    /// predicate instead of an <c>IS NULL</c> check on a property access.
+    /// </summary>
+    /// <remarks>
+    /// The lowerer only applies the rewrite to a direct simple property on a typed node or
+    /// relationship, and only for <c>== null</c>. Dialects that opt in must render
+    /// <see cref="CypherBinaryOperator.PropertyKeyExists"/> and must guarantee that a stored null
+    /// value is omitted from the property map, so key absence and a null value are equivalent.
+    /// </remarks>
+    bool SupportsPropertyKeyExistence => false;
 
     /// <summary>Renders a parameter reference.</summary>
     /// <param name="name">The parameter name without a prefix.</param>

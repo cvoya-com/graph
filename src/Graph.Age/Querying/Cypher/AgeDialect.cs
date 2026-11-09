@@ -4,6 +4,7 @@
 using Cvoya.Graph.Age.Entities;
 using Cvoya.Graph.Cypher;
 using Cvoya.Graph.Cypher.Ast;
+using Cvoya.Graph.Cypher.Ast.Expressions;
 using Cvoya.Graph.Serialization;
 
 namespace Cvoya.Graph.Age.Querying.Cypher;
@@ -95,6 +96,16 @@ public sealed class AgeDialect : ICypherDialect
     /// native or lowered.
     /// </remarks>
     public CapabilitySet Capabilities => capabilities;
+
+    /// <summary>
+    /// Gets whether AGE lowers <c>== null</c> on a simple property to a key-existence test.
+    /// </summary>
+    /// <remarks>
+    /// AGE writes omit null properties, so a missing key is the stored representation of a null
+    /// value. The negated key-existence predicate avoids evaluating <c>agtype_access_operator</c>
+    /// for every candidate row; see <see cref="CypherBinaryOperator.PropertyKeyExists"/>.
+    /// </remarks>
+    public bool SupportsPropertyKeyExistence => true;
 
     /// <inheritdoc/>
     /// <remarks>
@@ -238,7 +249,7 @@ public sealed class AgeDialect : ICypherDialect
 
         var conditions = labels.Select(item =>
             $"({renderLiteral(item)} IN labels({target}) OR " +
-            $"{renderLiteral(item)} IN coalesce({target}.inheritance_labels, []))").ToArray();
+            $"properties({target}) @> {{ {AgeElementMatcher.InheritanceLabelsProperty}: [{renderLiteral(item)}] }})").ToArray();
         return conditions.Length == 1 ? conditions[0] : $"({string.Join(" OR ", conditions)})";
     }
 

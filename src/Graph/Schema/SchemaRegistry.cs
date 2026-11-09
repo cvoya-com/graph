@@ -34,6 +34,7 @@ public class SchemaRegistry : IDisposable
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private readonly Action<Assembly, IReadOnlyList<Exception>> _partialScanDiagnostic;
     private volatile bool _isInitialized;
+    private volatile bool _hasComplexProperties;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SchemaRegistry"/> class.
@@ -53,6 +54,17 @@ public class SchemaRegistry : IDisposable
     /// Gets whether the schema registry has been initialized.
     /// </summary>
     public bool IsInitialized => _isInitialized;
+
+    /// <summary>
+    /// Gets whether any registered entity type declares a complex property.
+    /// </summary>
+    /// <remarks>
+    /// AGE stores complex properties as provider-owned nodes reachable through marked
+    /// relationships. A graph whose registered types declare no complex property has no such
+    /// nodes, so query lowering can omit the correlated owner-isolation check. The value is
+    /// monotonic while the registry is populated and resets with <see cref="ClearAsync"/>.
+    /// </remarks>
+    internal bool HasComplexProperties => _hasComplexProperties;
 
     /// <summary>
     /// Asynchronously initializes the schema registry by discovering all INode and IRelationship types
@@ -324,6 +336,7 @@ public class SchemaRegistry : IDisposable
             _relationshipSchemas.Clear();
             _scannedAssemblies.Clear();
             _isInitialized = false;
+            _hasComplexProperties = false;
         }
         finally
         {
@@ -338,8 +351,17 @@ public class SchemaRegistry : IDisposable
         _isInitialized = true;
     }
 
+    private void TrackComplexProperties(Type entityType)
+    {
+        if (!_hasComplexProperties && GraphDataModel.GetComplexProperties(entityType).Any())
+        {
+            _hasComplexProperties = true;
+        }
+    }
+
     private void RegisterNodeType(Type nodeType, List<string> collisions)
     {
+        TrackComplexProperties(nodeType);
         var label = GetLabelFromType(nodeType);
         var owner = GetLabelOwner<NodeAttribute>(NormalizeForIdentity(nodeType));
 
@@ -361,6 +383,7 @@ public class SchemaRegistry : IDisposable
 
     private void RegisterRelationshipType(Type relationshipType, List<string> collisions)
     {
+        TrackComplexProperties(relationshipType);
         var type = GetLabelFromType(relationshipType);
         var owner = GetLabelOwner<RelationshipAttribute>(NormalizeForIdentity(relationshipType));
 

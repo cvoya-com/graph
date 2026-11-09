@@ -5,6 +5,7 @@ namespace Cvoya.Graph.Age.Querying.Cypher.Execution;
 
 using System.Runtime.CompilerServices;
 using Cvoya.Graph.Age.Core;
+using Cvoya.Graph.Cypher.Ast;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -17,10 +18,19 @@ internal sealed class CypherExecutor
         logger = loggerFactory?.CreateLogger<CypherExecutor>() ?? NullLogger<CypherExecutor>.Instance;
     }
 
+    public Task<List<AgeRecord>> ExecuteAsync(
+        string cypher,
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyList<string> projectionColumns,
+        AgeGraphTransaction transaction,
+        CancellationToken cancellationToken = default) =>
+        ExecuteAsync(cypher, parameters, projectionColumns, postProcessing: null, transaction, cancellationToken);
+
     public async Task<List<AgeRecord>> ExecuteAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
         AgeGraphTransaction transaction,
         CancellationToken cancellationToken = default)
     {
@@ -29,6 +39,7 @@ internal sealed class CypherExecutor
             cypher,
             parameters,
             projectionColumns,
+            postProcessing,
             cancellationToken).ConfigureAwait(false);
         await using var cursorLease = cursor.ConfigureAwait(false);
         var records = await cursor.ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -36,10 +47,19 @@ internal sealed class CypherExecutor
         return records;
     }
 
+    public static IAsyncEnumerable<AgeRecord> StreamAsync(
+        string cypher,
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyList<string> projectionColumns,
+        AgeGraphTransaction transaction,
+        CancellationToken cancellationToken = default) =>
+        StreamAsync(cypher, parameters, projectionColumns, postProcessing: null, transaction, cancellationToken);
+
     public static async IAsyncEnumerable<AgeRecord> StreamAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
         AgeGraphTransaction transaction,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -48,6 +68,7 @@ internal sealed class CypherExecutor
             cypher,
             parameters,
             projectionColumns,
+            postProcessing,
             cancellationToken).ConfigureAwait(false);
         await using var cursorLease = cursor.ConfigureAwait(false);
         while (await cursor.FetchAsync(cancellationToken).ConfigureAwait(false))

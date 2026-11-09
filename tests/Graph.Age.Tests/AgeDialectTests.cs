@@ -86,6 +86,21 @@ public sealed class AgeDialectTests
     }
 
     [Fact]
+    public void RendersLabelHierarchyAsGinFriendlyMapContainment()
+    {
+        var rendered = AgeDialect.Instance.RenderLabelTest(
+            "src",
+            ["Vertrag", "Müller-😀-東京"],
+            value => $"'{value}'");
+
+        Assert.Equal(
+            "(('Vertrag' IN labels(src) OR properties(src) @> { inheritance_labels: ['Vertrag'] }) OR " +
+            "('Müller-😀-東京' IN labels(src) OR properties(src) @> { inheritance_labels: ['Müller-😀-東京'] }))",
+            rendered);
+        Assert.DoesNotContain("coalesce", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void QuotesOnlyValidatedSqlProjectionColumns()
     {
         Assert.Equal("\"safe_column\"", AgeSqlIdentifier.Quote("safe_column", "projection column"));

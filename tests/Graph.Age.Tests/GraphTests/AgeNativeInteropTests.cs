@@ -34,9 +34,11 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         await RunRawAsync(
             """
             CREATE (source:Person)
-            SET source.FirstName = $sourceName, source.LastName = $marker, source.Age = 31
+            SET source.FirstName = $sourceName, source.LastName = $marker, source.Age = 31,
+                source.inheritance_labels = ['Person']
             CREATE (target:Person)
-            SET target.FirstName = $targetName, target.LastName = $marker, target.Age = 32
+            SET target.FirstName = $targetName, target.LastName = $marker, target.Age = 32,
+                target.inheritance_labels = ['Person']
             CREATE (source)-[relationship:KNOWS]->(target)
             SET relationship.Since = $since
             RETURN true AS created
@@ -168,7 +170,7 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
                   (target:AtomicOrdinaryIdNode {ordinary_id: $targetId})
             RETURN head(labels(source)) AS sourceLabel,
                    type(relationship) AS relationshipType,
-                   source.inheritance_labels IS NULL AS noNodeHierarchy,
+                   source.inheritance_labels[0] AS nodeLabel,
                    source.__graphModelEntityKind__ IS NULL AS noEntityKind,
                    relationship.Type IS NULL AS noStoredType,
                    relationship.inheritance_labels IS NULL AS noRelationshipHierarchy,
@@ -183,7 +185,7 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
 
         Assert.Equal("AtomicOrdinaryIdNode", shape["sourceLabel"].As<string>());
         Assert.Equal("ATOMIC_MUTATION_RELATIONSHIP", shape["relationshipType"].As<string>());
-        Assert.True(shape["noNodeHierarchy"].As<bool>());
+        Assert.Equal("AtomicOrdinaryIdNode", shape["nodeLabel"].As<string>());
         Assert.True(shape["noEntityKind"].As<bool>());
         Assert.True(shape["noStoredType"].As<bool>());
         Assert.True(shape["noRelationshipHierarchy"].As<bool>());

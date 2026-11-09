@@ -371,6 +371,8 @@ public sealed class CypherRenderer : ICypherRenderContext
             CypherBinaryOperator.Contains => "CONTAINS",
             CypherBinaryOperator.In => "IN",
             CypherBinaryOperator.Matches => "=~",
+            CypherBinaryOperator.PropertyContainment => "@>",
+            CypherBinaryOperator.PropertyKeyExists => "?",
             _ => throw new GraphException($"Unsupported Cypher binary operator '{binary.Op}'."),
         };
 
@@ -383,7 +385,7 @@ public sealed class CypherRenderer : ICypherRenderContext
         if (parentOperator is CypherBinaryOperator.Equal or CypherBinaryOperator.NotEqual or
             CypherBinaryOperator.LessThan or CypherBinaryOperator.LessThanOrEqual or
             CypherBinaryOperator.GreaterThan or CypherBinaryOperator.GreaterThanOrEqual or
-            CypherBinaryOperator.Matches &&
+            CypherBinaryOperator.Matches or CypherBinaryOperator.PropertyContainment &&
             binary.Op is CypherBinaryOperator.Add or CypherBinaryOperator.Subtract or
                 CypherBinaryOperator.Multiply or CypherBinaryOperator.Divide or CypherBinaryOperator.Modulo)
         {
