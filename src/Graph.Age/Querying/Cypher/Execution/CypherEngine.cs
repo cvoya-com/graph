@@ -338,12 +338,24 @@ internal sealed class CypherEngine
         };
         if (!cascadeDelete)
         {
+            // AGE 1.8 crashes on a list parameter inside IN ($targetIds), so the preflight
+            // unwinds the list instead. Two directed matches are required because a deleted
+            // node can be either endpoint. Collecting DISTINCT relationship ids before the
+            // final count keeps self-relationships (and relationships between two selected
+            // targets) from being counted twice. Complex-property marker edges stay excluded.
             var preflight = $"""
+                UNWIND $targetIds AS targetId
                 MATCH (target)
-                WHERE id(target) IN $targetIds
-                OPTIONAL MATCH (target)-[relationship]-()
-                WHERE coalesce(relationship.{ComplexPropertyStorage.RelationshipMarkerProperty}, false) = false
-                RETURN count(DISTINCT id(relationship)) AS relationshipCount
+                WHERE id(target) = targetId
+                OPTIONAL MATCH (target)-[outgoing]->()
+                WHERE coalesce(outgoing.{ComplexPropertyStorage.RelationshipMarkerProperty}, false) = false
+                WITH target, collect(DISTINCT id(outgoing)) AS outgoingIds
+                OPTIONAL MATCH (target)<-[incoming]-()
+                WHERE coalesce(incoming.{ComplexPropertyStorage.RelationshipMarkerProperty}, false) = false
+                WITH target, outgoingIds, collect(DISTINCT id(incoming)) AS incomingIds
+                WITH target, outgoingIds + incomingIds AS relationshipIds
+                UNWIND relationshipIds AS relationshipId
+                RETURN count(DISTINCT relationshipId) AS relationshipCount
                 """;
             var records = await _executor.ExecuteAsync(
                 preflight,

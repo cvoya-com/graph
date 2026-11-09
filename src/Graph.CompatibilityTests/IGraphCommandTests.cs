@@ -901,6 +901,46 @@ public interface IGraphCommandTests : IGraphTest
     }
 
     [Fact]
+    public async Task SetBasedNodeDelete_PreflightsIncomingRelationshipsAndCascadeDetachesThem()
+    {
+        var marker = $"incoming-delete-{Guid.NewGuid():N}";
+        var source = new Person { FirstName = "source", LastName = $"{marker}-source" };
+        var target = new Person { FirstName = "target", LastName = $"{marker}-target" };
+        var relationship = new Knows();
+        await Graph.CreateNodeAsync(source, cancellationToken: TestContext.Current.CancellationToken);
+        await Graph.CreateNodeAsync(target, cancellationToken: TestContext.Current.CancellationToken);
+        await Graph.ConnectAsync(source, relationship, target, cancellationToken: TestContext.Current.CancellationToken);
+        var targets = Graph.Nodes<Person>().Where(person => person.LastName == target.LastName);
+
+        await Assert.ThrowsAsync<GraphException>(() => GraphCommandExtensions.DeleteAsync(
+            targets,
+            cascadeDelete: false,
+            TestContext.Current.CancellationToken));
+
+        _ = await Graph.FindNodeByTestKeyAsync<Person>(
+            target.TestKey,
+            cancellationToken: TestContext.Current.CancellationToken);
+        _ = await Graph.FindRelationshipByTestKeyAsync<Knows>(
+            relationship.TestKey,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        var affected = await GraphCommandExtensions.DeleteAsync(
+            targets,
+            cascadeDelete: true,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, affected);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Graph.FindNodeByTestKeyAsync<Person>(
+            target.TestKey,
+            cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Null(await Graph.RelationshipsByTestKey<Knows>(relationship.TestKey)
+            .SingleOrDefaultAsync(TestContext.Current.CancellationToken));
+        _ = await Graph.FindNodeByTestKeyAsync<Person>(
+            source.TestKey,
+            cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task ExactOneEndpointSelection_ThrowsRoleSpecificCardinalityFailures()
     {
         var marker = $"command-exact-one-{Guid.NewGuid():N}";
