@@ -130,7 +130,7 @@ Additional gates:
 |---|---|
 | `dotnet build` | Succeeded, 0 errors |
 | Fast lane (`--lane fast --disable-diff-engine`) | 8 projects, 2,527 cases, 0 failed |
-| Neo4j lane sanity | See attached `neo4j-lane.log` |
+| Neo4j lane sanity (`--lane neo4j --disable-diff-engine --no-build`) | 617 cases, 617 passed, 0 failed |
 
 Commands:
 

@@ -208,12 +208,15 @@ infrastructure, discovery, static, ad hoc, or unplanned capability skips.
 
 | Repository gate | Result |
 |---|---|
-| Debug build | Passed with 0 warnings and 0 errors |
-| Fast test lane | Passed: 8 projects, 2,526 runtime cases |
-| All test lane | Passed: 10 projects, 3,869 runtime cases |
-| Package validation | Passed: exact 9-package / 15-assembly inventory and package-reference consumer build |
-| Formatting | Passed with no changes required |
-| Portable CodeQL | Passed: Actions, C#, and Ruby SARIF each contained 0 results |
+| Debug build | Passed with 0 errors |
+| Fast test lane | Passed: 8 projects, 2,527 runtime cases |
+| Neo4j lane sanity | Passed: 617 runtime cases |
+| AGE 1.8.0 lane, two fresh containers | Passed: 733 runtime cases each (see matrix above) |
+| AGE 1.7.0 lane, fresh container | Passed: 733 runtime cases |
+| All test lane (prior certification, not re-run) | Passed: 10 projects, 3,869 runtime cases |
+| Package validation (prior certification, not re-run) | Passed: exact 9-package / 15-assembly inventory and package-reference consumer build |
+| Formatting (prior certification, not re-run) | Passed with no changes required |
+| Portable CodeQL (prior certification, not re-run) | Passed: Actions, C#, and Ruby SARIF each contained 0 results |
 
 ### Expected skip ledger
 
@@ -247,16 +250,16 @@ Run the retained strict evidence:
 ```bash
 ./scripts/run-tests.sh --configuration Debug --lane fast \
   --project Graph.CompatibilityTests.Tests --disable-diff-engine --report-trx \
-  --results-directory artifacts/compliance/393-7131eeac/strict-meta
+  --results-directory artifacts/compliance/NUL-88/strict-meta
 GRAPHMODEL_COMPLIANCE_STRICT=1 ./scripts/run-tests.sh --configuration Debug --lane fast \
   --project Graph.InMemory.Tests --disable-diff-engine --report-trx \
-  --results-directory artifacts/compliance/393-7131eeac/strict-inmemory
+  --results-directory artifacts/compliance/NUL-88/strict-inmemory
 GRAPHMODEL_COMPLIANCE_STRICT=1 ./scripts/run-tests.sh --configuration Debug --lane neo4j \
   --project Graph.Neo4j.Tests --disable-diff-engine --report-trx \
-  --results-directory artifacts/compliance/393-7131eeac/strict-neo4j
+  --results-directory artifacts/compliance/NUL-88/strict-neo4j
 GRAPHMODEL_COMPLIANCE_STRICT=1 ./scripts/run-tests.sh --configuration Debug --lane age \
   --project Graph.Age.Tests --disable-diff-engine --report-trx \
-  --results-directory artifacts/compliance/393-7131eeac/strict-age
+  --results-directory artifacts/compliance/NUL-88/strict-age
 ```
 
 Run the repository gates against the same source candidate:
@@ -267,7 +270,7 @@ dotnet build --configuration Debug
 ./scripts/run-tests.sh --configuration Debug --lane all --disable-diff-engine
 dotnet msbuild eng/PackageValidation.proj -target:Validate
 dotnet format cvoya-graph.sln --verify-no-changes --no-restore --verbosity minimal
-./scripts/run-codeql.sh --output-dir artifacts/compliance/393-7131eeac/codeql
+./scripts/run-codeql.sh --output-dir artifacts/compliance/NUL-88/codeql
 ```
 
 Every runtime skip counted in the capability column carries the suite's declared-capability
