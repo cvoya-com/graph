@@ -183,7 +183,11 @@ path value per row:
 maps to `out`, `in`, or `any`; edge types are the physical AGE label names; an unbounded maximum is
 passed as SQL null. The engine hydrates each returned `GraphValue.Path` into `IGraphPath` by
 reusing the existing node/relationship materializer per hop, preserving relationship orientation.
-No client-side enumeration, finite-depth fallback, or provider-local graph algorithm is used.
+A native path value carries only the path nodes and relationships; provider-owned complex values
+are separate nodes, so native shortest-path materialization rejects entity types that declare
+complex properties with an explicit error instead of silently returning incomplete entities.
+Those queries must use `TraversePaths`. No client-side enumeration, finite-depth fallback, or
+provider-local graph algorithm is used.
 
 On AGE 1.7.0 the store caches the baseline dialect, `ShortestPath` stays absent, the
 capability-gated TCK test skips with the recorded capability reason, and reachable shortest-path
