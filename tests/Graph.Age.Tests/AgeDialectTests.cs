@@ -106,4 +106,29 @@ public sealed class AgeDialectTests
         Assert.Equal("\"safe_column\"", AgeSqlIdentifier.Quote("safe_column", "projection column"));
         Assert.Throws<ArgumentException>(() => AgeSqlIdentifier.Quote("value agtype); DROP TABLE users; --", "projection column"));
     }
+
+    [Fact]
+    public void RenderCollectionContains_NeverPutsNativeIdentityOnTheLeftOfIn()
+    {
+        var rendered = AgeDialect.Instance.RenderCollectionContains("$graphIds", "id(src)");
+
+        Assert.DoesNotContain("id(src) IN", rendered, StringComparison.Ordinal);
+        Assert.StartsWith("size([__cvoya_collection_item IN $graphIds WHERE ", rendered, StringComparison.Ordinal);
+        Assert.Contains("__cvoya_collection_item = id(src)", rendered, StringComparison.Ordinal);
+        // toString() cannot be applied to a native graph id.
+        Assert.DoesNotContain("toString(id(src))", rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderCollectionContains_KeepsNullAwareRenderingForStoredCollections()
+    {
+        var rendered = AgeDialect.Instance.RenderCollectionContains("src.Tags", "src.Name");
+
+        Assert.Contains("__cvoya_collection_item = src.Name", rendered, StringComparison.Ordinal);
+        // AGE 1.7 needs the toString() null test for agtype null parameters; keep the shared form.
+        Assert.Contains(
+            "toString(__cvoya_collection_item) IS NULL AND toString(src.Name) IS NULL",
+            rendered,
+            StringComparison.Ordinal);
+    }
 }

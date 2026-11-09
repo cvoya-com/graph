@@ -140,7 +140,8 @@ internal sealed class ComplexPropertyManager(AgeGraphContext context)
         }
 
         var result = await transaction.RunAsync(
-            $"MATCH (parent) WHERE id(parent) IN $parentGraphIds {string.Join(" ", clauses)} RETURN count(parent) AS affectedCount",
+            $"MATCH (parent) WHERE size([parentGraphId IN $parentGraphIds WHERE id(parent) = parentGraphId]) > 0 " +
+            $"{string.Join(" ", clauses)} RETURN count(parent) AS affectedCount",
             parameters,
             cancellationToken).ConfigureAwait(false);
         _ = await result.ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -449,7 +450,7 @@ internal sealed class ComplexPropertyManager(AgeGraphContext context)
     {
         var findCypher = $@"
             MATCH (parent)-[propertyRels*1..{GraphDataModel.DefaultDepthAllowed}]->(propertyNode)
-            WHERE id(parent) IN $parentGraphIds
+            WHERE size([parentGraphId IN $parentGraphIds WHERE id(parent) = parentGraphId]) > 0
               AND size([age_hop IN range(0, size(propertyRels) - 1)
                         WHERE propertyRels[toInteger(age_hop)].{ComplexPropertyStorage.RelationshipMarkerProperty} = true]) = size(propertyRels)
               AND propertyRels[toInteger(0)].inheritance_labels[toInteger(0)] IN $relationshipTypes

@@ -696,9 +696,13 @@ internal sealed class ExpressionToCypherAstLowerer(
         }
 
         var loweredSource = Lower(source, aliases);
-        expression = loweredSource is CollectionPropertyAccess
-            ? new CollectionContainsExpression(loweredSource, Lower(item, aliases))
-            : new AstBinaryExpression(CypherBinaryOperator.In, Lower(item, aliases), loweredSource);
+        var loweredItem = Lower(item, aliases);
+        // Native identity is routed through the dialect's collection-membership hook even when the
+        // collection is a parameter. Some providers (AGE 1.8.0) crash when id() is the left operand
+        // of IN, and only the dialect knows how to render that membership safely.
+        expression = loweredSource is CollectionPropertyAccess || loweredItem is NativeElementIdentity
+            ? new CollectionContainsExpression(loweredSource, loweredItem)
+            : new AstBinaryExpression(CypherBinaryOperator.In, loweredItem, loweredSource);
         return true;
     }
 

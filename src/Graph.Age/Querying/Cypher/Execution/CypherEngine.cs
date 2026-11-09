@@ -289,7 +289,7 @@ internal sealed class CypherEngine
             };
             var predicates = new List<string>
             {
-                "NOT (id(candidate) IN $selectedIds)",
+                "size([selectedId IN $selectedIds WHERE id(candidate) = selectedId]) = 0",
             };
             for (var index = 0; index < candidate.Constraint.Properties.Count; index++)
             {

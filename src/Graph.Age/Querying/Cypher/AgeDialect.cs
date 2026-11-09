@@ -253,6 +253,29 @@ public sealed class AgeDialect : ICypherDialect
         return conditions.Length == 1 ? conditions[0] : $"({string.Join(" OR ", conditions)})";
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// AGE 1.8.0 segfaults when <c>id()</c> is the left operand of <c>IN</c>, so native identity
+    /// membership is rendered as a filtered list comprehension instead. Other collection items keep
+    /// the shared null-aware rendering: AGE 1.7 does not match an agtype null parameter with
+    /// <c>IS NULL</c>, so the <c>toString()</c> form remains necessary there.
+    /// </remarks>
+    public string RenderCollectionContains(string collection, string item)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(item);
+
+        // NativeElementIdentity is the only item AGE renders as id(...); it is never null.
+        if (item.StartsWith("id(", StringComparison.Ordinal))
+        {
+            return $"size([__cvoya_collection_item IN {collection} WHERE " +
+                $"__cvoya_collection_item = {item}]) > 0";
+        }
+
+        return $"size([__cvoya_collection_item IN {collection} WHERE " +
+            $"__cvoya_collection_item = {item} OR " +
+            $"(toString(__cvoya_collection_item) IS NULL AND toString({item}) IS NULL)]) > 0";
+    }
+
     private static GraphQueryTranslationException FullTextNotSupported() => new(
         $"The Apache AGE dialect does not support capability {GraphCapability.FullTextSearch}.");
 }
