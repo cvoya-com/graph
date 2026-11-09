@@ -284,18 +284,6 @@ public sealed class GraphResultProcessor
             ComplexProperties: new Dictionary<string, Property>()
         );
 
-        // Find all complex properties where this node is the parent
-        if (!hasComplexProperties)
-        {
-            // No complex-property rows means no schema property can match; skip the per-node
-            // LINQ search and the schema walk for the common flat-node case.
-            return entityInfo;
-        }
-
-        var directComplexProps = allComplexProperties
-            .Where(cp => cp.ParentNode.ElementId == node.ElementId)
-            .ToList();
-
         // Resolve the schema from the DISCOVERED concrete type, not the declared/target type.
         // For a base-typed complex property holding a derived instance (e.g. a PoliceDogDescription
         // in a List<AnimalDescription>), nodeType is the base (AnimalDescription) whose schema has
@@ -309,6 +297,21 @@ public sealed class GraphResultProcessor
             _logger.LogWarningGraphResultProcessor280(actualType.Name);
             return entityInfo;
         }
+
+        // An all-null complex collection has no child rows but still stores its length and null
+        // indexes in the node's storage entries, so a missing schema complex property is the only
+        // safe reason to skip the rehydration walk.
+        if (!hasComplexProperties && schema.ComplexProperties.Count == 0)
+        {
+            // No complex-property rows and no schema property can match; skip the per-node LINQ
+            // search for the common flat-node case.
+            return entityInfo;
+        }
+
+        // Find all complex properties where this node is the parent
+        var directComplexProps = allComplexProperties
+            .Where(cp => cp.ParentNode.ElementId == node.ElementId)
+            .ToList();
 
         foreach (var (propertyName, propertySchema) in schema.ComplexProperties)
         {
