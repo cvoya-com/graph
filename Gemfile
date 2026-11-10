@@ -2,9 +2,9 @@ source "https://rubygems.org"
 
 gem "jekyll", "~> 4.3"
 gem "minima", "~> 2.5"
-gem "jekyll-feed", "~> 0.15"
+gem "jekyll-feed", "~> 0.18"
 gem "jekyll-sitemap", "~> 1.4"
-gem "jekyll-relative-links", "~> 0.8"
+gem "jekyll-relative-links", "~> 0.9"
 gem "kramdown-parser-gfm", "~> 1.1"
 # 5.x deliberately: it needs Ruby >= 3.3 and pulls pdf-reader -> ttfunk (GPL),
 # which the dependency-review license gate denies.
