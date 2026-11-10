@@ -4,7 +4,7 @@
 |---|---|
 | Provider | `Cvoya.Graph.Age` (issue #86 implementation) |
 | Compliance suite | Repository build (`Cvoya.Graph.CompatibilityTests` 0.0.0-dev) |
-| Candidate source | `79ed6fa83b8442cd5c8f208d58d3ce3f191b497a` |
+| Candidate source | `90b9699` |
 | Backing store | Apache AGE 1.8.0 / PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) (`apache/age:release_PG18_1.8.0`) as the primary store; Apache AGE 1.7.0 / PostgreSQL 18.1 (Debian 18.1-1.pgdg13+2) (`apache/age:release_PG18_1.7.0`) also validated |
 | Reference provider | Neo4j 5.26.28 Enterprise (`neo4j:5-enterprise`, image `037e96a1ddb9581ba8dc420a03dbced3ffe303b7f126628dfa477566481786f0`) |
 | Date / run | 2026-11-09 / local NUL-89 native shortest-path verification |

@@ -302,7 +302,8 @@ query option, not a relationship property.
 
 Use `Traverse` when only target nodes are needed and `TraversePaths` when full multi-hop paths are
 needed. Shortest-path operators require `GraphCapability.ShortestPath`: Neo4j and in-memory support
-them; AGE deliberately does not in v1.0.
+them natively, and Apache AGE supports them on AGE 1.8.0 or later through the native
+`age_shortest_path` / `age_all_shortest_paths` functions. AGE 1.7 rejects them during translation.
 
 ## Transactions and resource ownership
 
