@@ -561,7 +561,15 @@ var hasMinors = await graph.Nodes<Person>()
 // Check all match condition
 var allAdults = await graph.Nodes<Person>()
     .AllAsync(p => p.Age >= 18);
+
+// Synchronous terminals translate the same way
+var total = graph.Nodes<Person>().Count();
+var totalAsLong = graph.Nodes<Person>().LongCount();
 ```
+
+`Count`/`LongCount` (and `CountAsync`/`LongCountAsync`) lower to a server-side `count(...)`
+aggregate. Never materialize a query just to count it: `Nodes<T>().ToList().Count` reads and
+deserializes every entity and is not supported for large result sets.
 
 ### First, Single, Last
 

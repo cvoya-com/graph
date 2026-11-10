@@ -3,6 +3,7 @@
 
 namespace Cvoya.Graph.Core.Tests;
 
+using System.Reflection;
 using Cvoya.Graph.Querying;
 
 [Trait("Area", "QueryModelBuilder")]
@@ -24,6 +25,21 @@ public class LinqOperatorDispatchTests
         {
             Assert.Equal(registration.Value, LinqOperatorDispatch.Resolve(registration.Key));
         }
+    }
+
+    [Theory]
+    [InlineData(nameof(Queryable.Count))]
+    [InlineData(nameof(Queryable.LongCount))]
+    public void SynchronousQueryableCountOperators_ResolveToCount(string methodName)
+    {
+        var method = typeof(Queryable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(candidate => candidate.Name == methodName && candidate.IsGenericMethodDefinition)
+            .Where(candidate => candidate.GetParameters().Length == 1)
+            .Single()
+            .MakeGenericMethod(typeof(object));
+
+        Assert.Equal(LinqOperator.Count, LinqOperatorDispatch.Resolve(method));
     }
 
     [Fact]

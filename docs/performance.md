@@ -45,6 +45,21 @@ var users = await graph.Nodes<User>()
 var emails = users.Select(u => u.Email).ToList();
 ```
 
+### Counting Without Materializing
+
+```csharp
+// ✅ Good - one server-side count aggregate
+var activeUsers = await graph.Nodes<User>()
+    .CountAsync(u => u.IsActive);
+
+// ❌ Avoid - loads and deserializes every entity just to count it
+var allUsers = await graph.Nodes<User>().ToListAsync();
+var userCount = allUsers.Count;
+```
+
+`Count`/`LongCount` and their async variants translate to a server-side `count(...)` aggregate.
+Treat `.ToList().Count` as forbidden in hot paths and large result sets.
+
 ### Efficient Relationship Traversal
 
 ```csharp
