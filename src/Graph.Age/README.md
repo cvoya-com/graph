@@ -64,7 +64,9 @@ connected server is Apache AGE 1.8.0 or later—`GraphCapability.ShortestPath`. 
 provider lowers `ShortestPath`/`AllShortestPaths` to the native
 `ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths` functions because the server
 does not parse the Cypher pattern syntax. On AGE 1.7 the capability stays absent, the
-capability-gated TCK test skips, and translation rejects the operators. The provider does not
+capability-gated TCK test skips, and translation rejects the operators. `AgeGraphStoreOptions`
+can force `NativeShortestPath` and `NativePredicateFunctions` `Enabled` (fail clearly below 1.8)
+or `Disabled` (keep pre-1.8 behavior on a newer server). The provider does not
 declare nested transactions or whole-entity ordering. Unsupported operations fail during
 translation or are skipped only when a compatibility test is explicitly gated by the missing
 capability.

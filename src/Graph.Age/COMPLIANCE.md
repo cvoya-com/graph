@@ -205,22 +205,28 @@ The inventory was derived from the candidate assemblies with
 `ComplianceInventory.TotalTestMethods`, `ComplianceInventory.MinimumExecuted(declared)`, and
 `ComplianceInventory.ExpectedCapabilitySkips(declared)`, using the connected store's declared
 capabilities. On AGE 1.8.0 only `OrderByEntity` is capability-skipped; on AGE 1.7.0 both
-`OrderByEntity` and `ShortestPath` are skipped. Theory rows and the provider-specific adapter tests
-expand the provider run to 752 runtime cases: 751 passed and 1 capability-skipped on AGE 1.8.0;
-741 passed and 11 capability-skipped on AGE 1.7.0 (the 9 shortest-path provider tests plus the TCK
-contract and `OrderByEntity`).
+`OrderByEntity` and `ShortestPath` are skipped. Theory rows, the provider-specific adapter tests, and
+the versioned feature-control tests expand the provider run to 758 runtime cases: 757 passed and
+1 capability-skipped on AGE 1.8.0; 747 passed and 11 capability-skipped on AGE 1.7.0 (the 9
+shortest-path provider tests plus the TCK contract and `OrderByEntity`).
+
+`AgeGraphStoreOptions` can force `NativeShortestPath` and `NativePredicateFunctions` `Enabled`
+(failing clearly below AGE 1.8.0) or `Disabled` (keeping the pre-1.8 behavior on a newer server).
+The default `Auto` mode is what the capacity matrix below certifies.
 
 ### AGE backing-store matrix (NUL-89)
 
 | Run | Backing store | Runtime cases | Passed | Expected skips | Failed | `signal 11` | Container restarts |
 |---|---|---:|---:|---:|---:|---:|---:|
-| AGE 1.8 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 752 | 751 | 1 | 0 | 0 | 0 |
-| AGE 1.7 baseline (fresh container) | AGE 1.7.0 / PostgreSQL 18.1 | 752 | 741 | 11 | 0 | 0 | 0 |
+| AGE 1.8 run 1 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 758 | 757 | 1 | 0 | 0 | 0 |
+| AGE 1.8 run 2 (fresh container) | AGE 1.8.0 / PostgreSQL 18.6 | 758 | 757 | 1 | 0 | 0 | 0 |
+| AGE 1.7 baseline (fresh container) | AGE 1.7.0 / PostgreSQL 18.1 | 758 | 747 | 11 | 0 | 0 | 0 |
 
 Each container was created afresh from `apache/age:release_PG18_1.8.0` and
 `apache/age:release_PG18_1.7.0` and received the full AGE lane once. After every run, `docker logs`
 contained no `signal 11` or `terminated by signal`, `pg_isready` and `SELECT 1` succeeded, and the
-restart count stayed 0. Raw logs: `age18-lane.log` and `age17-lane.log`.
+restart count stayed 0. Raw logs: `age18-combined.log`, `age18-combined-run2.log`, and
+`age17-combined.log`.
 
 | Prior strict run | Runtime cases | Passed | Expected skips | Failed | TRX |
 |---|---:|---:|---:|---:|---|
@@ -237,8 +243,8 @@ infrastructure, discovery, static, ad hoc, or unplanned capability skips.
 | Debug build | Passed with 0 errors |
 | Fast test lane | Passed: 8 projects, 2,527 runtime cases |
 | Neo4j lane sanity | Passed: 617 runtime cases |
-| AGE 1.8.0 lane, fresh container | Passed: 752 runtime cases, 0 failed, 0 `signal 11` |
-| AGE 1.7.0 lane, fresh container | Passed: 752 runtime cases, 11 expected skips |
+| AGE 1.8.0 lane, two fresh containers | Passed: 758 runtime cases each, 0 failed, 0 `signal 11` |
+| AGE 1.7.0 lane, fresh container | Passed: 758 runtime cases, 11 expected skips |
 | All test lane (prior certification, not re-run) | Passed: 10 projects, 3,869 runtime cases |
 | Package validation (prior certification, not re-run) | Passed: exact 9-package / 15-assembly inventory and package-reference consumer build |
 | Formatting | Passed with no changes required |

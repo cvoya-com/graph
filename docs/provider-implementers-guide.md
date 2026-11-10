@@ -318,7 +318,8 @@ function and declines the capability.
 
 Capabilities may be determined per connected backend version. The AGE harness reports the connected
 store's version-gated capability set: `ShortestPath` is present on 1.8.0 and later and absent on
-1.7.0.
+1.7.0. `AgeGraphStoreOptions` can force the native shortest-path and predicate features `Enabled`
+(fail clearly on an older server) or `Disabled` (keep the pre-1.8 behavior on a newer server).
 
 `SetOperations` gates typed and standard-LINQ `Union` plus typed `Concat`. Both operands are planned
 independently with disjoint parameter namespaces. `Union` uses distinct row semantics; `Concat`

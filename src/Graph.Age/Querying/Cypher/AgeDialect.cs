@@ -75,6 +75,7 @@ public sealed class AgeDialect : ICypherDialect
 
     private readonly CapabilitySet capabilities;
     private readonly bool nativeShortestPath;
+    private readonly bool nativePredicateFunctions;
 
     /// <summary>Gets the first Apache AGE version that exposes the native shortest-path functions.</summary>
     internal static Version MinimumNativeShortestPathVersion { get; } = new(1, 8, 0);
@@ -82,31 +83,38 @@ public sealed class AgeDialect : ICypherDialect
     /// <summary>Initializes the Apache AGE dialect.</summary>
     /// <remarks>This parameterless dialect describes the AGE 1.7 baseline.</remarks>
     public AgeDialect()
-        : this(SupportedCapabilities, nativeShortestPath: false)
+        : this(SupportedCapabilities, nativeShortestPath: false, nativePredicateFunctions: false)
     {
     }
 
-    private AgeDialect(CapabilitySet capabilities, bool nativeShortestPath)
+    private AgeDialect(
+        CapabilitySet capabilities,
+        bool nativeShortestPath,
+        bool nativePredicateFunctions)
     {
         this.capabilities = capabilities;
         this.nativeShortestPath = nativeShortestPath;
+        this.nativePredicateFunctions = nativePredicateFunctions;
     }
 
     /// <summary>Gets the shared Apache AGE 1.7 dialect instance.</summary>
     public static AgeDialect Instance { get; } = new();
 
-    internal static AgeDialect PlanningInstance { get; } = new(PlanningCapabilities, nativeShortestPath: false);
+    internal static AgeDialect PlanningInstance { get; } =
+        new(PlanningCapabilities, nativeShortestPath: false, nativePredicateFunctions: false);
 
-    private static AgeDialect NativeInstance { get; } = new(NativeSupportedCapabilities, nativeShortestPath: true);
+    private static AgeDialect NativeInstance { get; } =
+        new(NativeSupportedCapabilities, nativeShortestPath: true, nativePredicateFunctions: true);
 
     private static AgeDialect NativePlanningInstance { get; } =
-        new(NativePlanningCapabilities, nativeShortestPath: true);
+        new(NativePlanningCapabilities, nativeShortestPath: true, nativePredicateFunctions: true);
 
     /// <summary>
     /// Gets the planning dialect for command selections. Command selections end in a scalar
     /// native-id projection and share the same relationship-existence lowering as read queries.
     /// </summary>
-    internal static AgeDialect CommandPlanningInstance { get; } = new(CommandPlanningCapabilities, nativeShortestPath: false);
+    internal static AgeDialect CommandPlanningInstance { get; } =
+        new(CommandPlanningCapabilities, nativeShortestPath: false, nativePredicateFunctions: false);
 
     /// <summary>Gets the dialect matching the connected AGE server version.</summary>
     /// <param name="version">The installed AGE extension version.</param>
@@ -114,6 +122,21 @@ public sealed class AgeDialect : ICypherDialect
     {
         ArgumentNullException.ThrowIfNull(version);
         return version >= MinimumNativeShortestPathVersion ? NativeInstance : Instance;
+    }
+
+    /// <summary>
+    /// Gets the dialect matching the detected server capabilities and the store's feature options.
+    /// </summary>
+    /// <param name="serverCapabilities">The detected AGE version and enabled optional features.</param>
+    internal static AgeDialect ForServer(AgeServerCapabilities serverCapabilities)
+    {
+        ArgumentNullException.ThrowIfNull(serverCapabilities);
+
+        var shortestPath = serverCapabilities.SupportsNativeShortestPath;
+        return new AgeDialect(
+            shortestPath ? NativeSupportedCapabilities : SupportedCapabilities,
+            shortestPath,
+            serverCapabilities.SupportsNativePredicateFunctions);
     }
 
     /// <summary>Parses an AGE <c>extversion</c> string, tolerating suffixes and two-part versions.</summary>
@@ -133,6 +156,9 @@ public sealed class AgeDialect : ICypherDialect
 
     /// <summary>Gets whether native shortest-path functions are available on this server.</summary>
     internal bool SupportsNativeShortestPath => nativeShortestPath;
+
+    /// <summary>Gets whether native Cypher predicate functions are enabled for this server.</summary>
+    internal bool SupportsNativePredicateFunctions => nativePredicateFunctions;
 
     /// <inheritdoc/>
     public string Name => "Apache AGE";
@@ -319,13 +345,21 @@ public sealed class AgeDialect : ICypherDialect
         // NativeElementIdentity is the only item AGE renders as id(...); it is never null.
         if (item.StartsWith("id(", StringComparison.Ordinal))
         {
+            // AGE 1.8's any() transform mis-types a graphid comparison inside the predicate
+            // ("no relation entry for relid"), so identity membership keeps the list form even on
+            // a server that exposes the predicate functions.
             return $"size([__cvoya_collection_item IN {collection} WHERE " +
                 $"__cvoya_collection_item = {item}]) > 0";
         }
 
-        return $"size([__cvoya_collection_item IN {collection} WHERE " +
-            $"__cvoya_collection_item = {item} OR " +
-            $"(toString(__cvoya_collection_item) IS NULL AND toString({item}) IS NULL)]) > 0";
+        var predicate = $"__cvoya_collection_item = {item} OR " +
+            $"(toString(__cvoya_collection_item) IS NULL AND toString({item}) IS NULL)";
+
+        // AGE 1.8 added the predicate functions. any() tests stored-collection membership without
+        // materializing a filtered list; AGE 1.7 only has the list-comprehension form.
+        return nativePredicateFunctions
+            ? $"any(__cvoya_collection_item IN {collection} WHERE {predicate})"
+            : $"size([__cvoya_collection_item IN {collection} WHERE {predicate}]) > 0";
     }
 
     private static GraphQueryTranslationException FullTextNotSupported() => new(

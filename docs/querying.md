@@ -259,7 +259,10 @@ source can return shortest paths to several endpoints. Providers must declare
 `GraphCapability.ShortestPath`. Neo4j and the in-memory provider implement it. Apache AGE declares the
 capability only when the connected AGE extension is 1.8.0 or later, where the provider lowers the
 operation to `ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths`; AGE 1.7 has
-neither function and rejects the operators during translation.
+neither function and rejects the operators during translation. `AgeGraphStoreOptions.NativeShortestPath`
+can force the feature `Enabled` (fail clearly below 1.8) or `Disabled` (keep the pre-1.8 rejection
+even on 1.8). `AgeGraphStoreOptions.NativePredicateFunctions` similarly controls whether stored-collection
+membership uses AGE 1.8's `any()` predicate on the server.
 
 ### Optional traversal
 

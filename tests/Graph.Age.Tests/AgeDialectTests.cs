@@ -131,4 +131,37 @@ public sealed class AgeDialectTests
             rendered,
             StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void RenderCollectionContains_UsesNativeAnyPredicateForStoredCollectionsOnAge18()
+    {
+        var dialect = AgeDialect.ForServer(
+            new AgeServerCapabilities(new Version(1, 8, 0), AgeFeature.NativePredicateFunctions));
+
+        var identity = dialect.RenderCollectionContains("$graphIds", "id(src)");
+        var stored = dialect.RenderCollectionContains("src.Tags", "src.Name");
+
+        // AGE 1.8's any() transform mis-types a graphid comparison, so identity keeps the list
+        // form even though the predicate functions are available.
+        Assert.StartsWith("size([__cvoya_collection_item IN $graphIds WHERE ", identity, StringComparison.Ordinal);
+        Assert.DoesNotContain("any(", identity, StringComparison.Ordinal);
+        Assert.Contains("__cvoya_collection_item = id(src)", identity, StringComparison.Ordinal);
+        Assert.StartsWith("any(__cvoya_collection_item IN src.Tags WHERE ", stored, StringComparison.Ordinal);
+        Assert.Contains(
+            "toString(__cvoya_collection_item) IS NULL AND toString(src.Name) IS NULL",
+            stored,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderCollectionContains_KeepsListComprehensionForAge17()
+    {
+        var dialect = AgeDialect.ForServer(
+            new AgeServerCapabilities(new Version(1, 7, 0), AgeFeature.None));
+
+        var identity = dialect.RenderCollectionContains("$graphIds", "id(src)");
+
+        Assert.StartsWith("size([__cvoya_collection_item IN $graphIds WHERE ", identity, StringComparison.Ordinal);
+        Assert.DoesNotContain("any(", identity, StringComparison.Ordinal);
+    }
 }
