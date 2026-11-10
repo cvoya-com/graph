@@ -103,8 +103,7 @@ public sealed class AgeGraphStore : IAsyncDisposable
         AgeLabelHierarchyValidationMode.Warn;
 
     /// <summary>
-    /// Registers a runtime node-label hierarchy for a derived label that has no CLR type, such as
-    /// a type materialized from a Nulex <c>FormConfig</c> as <see cref="Cvoya.Graph.DynamicNode"/>.
+    /// Registers a runtime node-label hierarchy for a derived label that has no CLR type
     /// </summary>
     /// <param name="parentLabel">The label of the base logical type.</param>
     /// <param name="childLabel">The label of the derived logical type.</param>

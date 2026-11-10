@@ -19,8 +19,7 @@ using Cvoya.Graph;
 /// loaded assemblies the first time a label is queried.
 /// </item>
 /// <item>
-/// Explicit runtime registrations for labels that are not backed by a CLR type, for example
-/// types materialized from Nulex <c>FormConfig</c> definitions as <see cref="DynamicNode"/>.
+/// Explicit runtime registrations for labels that are not backed by a CLR type, definitions as <see cref="DynamicNode"/>.
 /// </item>
 /// </list>
 /// <para>

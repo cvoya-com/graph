@@ -88,8 +88,7 @@ exposing graphids.
 Typed `[Node]` inheritance is discovered automatically from the loaded assemblies. Labels created
 at runtime have no CLR type, so the provider cannot discover them. Register every physical child
 label that can store a derived instance with
-`AgeGraphStore.RegisterLabelHierarchy(parentLabel, childLabel)` before the first query. This is
-mandatory for every new Nulex `FormConfig` label version: a base-label query expands only over the
+`AgeGraphStore.RegisterLabelHierarchy(parentLabel, childLabel)` before the first query. A base-label query expands only over the
 registered hierarchy, so an unregistered physical label stays invisible even though its rows declare
 the base label in `inheritance_labels`.
 
@@ -134,7 +133,7 @@ B-tree index on the ordering property serve the per-branch top-N) and the wrappe
 order, offset, and limit. `DISTINCT` projections become `SELECT DISTINCT` over the union unless an
 ordering forces a distinct union, and grouped `Count`/`Sum` results merge per-branch partials with
 `sum`. Ordering by a property over a large hierarchy needs a B-tree expression index on the AGE
-accessor for the gate to hold; without one the union still avoids the former all-table scan, but
+accessor to still be fast; without one the union still avoids the former all-table scan, but
 PostgreSQL sorts every hierarchy row. `AgeQueryRunner` composes this wrapper from validated
 identifiers and integer paging values; it never edits rendered Cypher text.
 
