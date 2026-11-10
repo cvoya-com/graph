@@ -45,7 +45,10 @@ Options:
   --results-directory <path>   Root directory for coverage and test reports
   --keep-going                  Run every selected project after a test failure
   --neo4j                       Start the local Neo4j container before tests
-  --age                         Start the local Apache AGE container before tests
+  --age                         Start the local Apache AGE container(s) before tests
+  --age-versions <csv>          Test the AGE lane once per AGE version (e.g. 1.7.0,1.8.0);
+                                1.7 uses port ${AGE_PORT:-5455}, 1.8 uses port ${AGE18_PORT:-5456}
+                                (override per version with AGE17_CONNECTION_STRING / AGE18_CONNECTION_STRING)
   --seq                         Start the local Seq container before tests
   --no-analyzers                Exclude analyzer tests
   --no-neo4j                    Exclude Neo4j tests from the all lane
@@ -59,6 +62,7 @@ Examples:
   ./scripts/run-tests.sh --fast
   ./scripts/run-tests.sh --lane neo4j --neo4j
   ./scripts/run-tests.sh --lane age --age
+  ./scripts/run-tests.sh --lane age --age --age-versions 1.7.0,1.8.0
   ./scripts/run-tests.sh --neo4j --age
   ./scripts/run-tests.sh --fast --project Graph.Core.Tests
   ./scripts/run-tests.sh --fast --project Graph.Core.Tests --filter '/*/*/GraphTests/*'
@@ -85,6 +89,7 @@ BUILD_SOLUTION=true
 DISABLE_DIFF_ENGINE=false
 PROJECT_SELECTORS=()
 TEST_FILTERS=()
+AGE_VERSIONS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -135,6 +140,10 @@ while [[ $# -gt 0 ]]; do
         --age)
             START_AGE=true
             shift
+            ;;
+        --age-versions)
+            IFS=',' read -r -a AGE_VERSIONS <<< "${2:?--age-versions requires a value}"
+            shift 2
             ;;
         --seq)
             START_SEQ=true
@@ -194,6 +203,46 @@ if [ "$START_AGE" = true ] && [ "$RUN_AGE" = false ]; then
     exit 64
 fi
 
+for age_version in "${AGE_VERSIONS[@]}"; do
+    if ! [[ "$age_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        print_error "Invalid AGE version '$age_version' in --age-versions (expected e.g. 1.7.0 or 1.8.0)."
+        exit 64
+    fi
+done
+
+# Maps an AGE version to the host port its container publishes (see scripts/containers/start-age.sh).
+age_port_for_version() {
+    case "$1" in
+        1.8*) echo "${AGE18_PORT:-5456}" ;;
+        *) echo "${AGE_PORT:-5455}" ;;
+    esac
+}
+
+# Builds the connection string for one AGE version. Per-version overrides win;
+# a single --age-versions entry also honors an explicit AGE_CONNECTION_STRING.
+age_connection_string_for() {
+    local version="$1"
+    local override=""
+
+    case "$version" in
+        1.7*) override="${AGE17_CONNECTION_STRING:-}" ;;
+        1.8*) override="${AGE18_CONNECTION_STRING:-}" ;;
+    esac
+
+    if [ -z "$override" ] && [ "${#AGE_VERSIONS[@]}" -eq 1 ] && [ -n "${AGE_CONNECTION_STRING:-}" ]; then
+        override="$AGE_CONNECTION_STRING"
+    fi
+
+    if [ -n "$override" ]; then
+        echo "$override"
+        return
+    fi
+
+    local port
+    port=$(age_port_for_version "$version")
+    echo "Host=localhost;Port=$port;Username=${AGE_USERNAME:-postgres};Password=${AGE_PASSWORD:-postgres};Database=${AGE_DATABASE:-postgres}"
+}
+
 print_header "CVOYA graph test runner"
 print_status "Configuration: $CONFIGURATION"
 print_status "Lane: $LANE"
@@ -204,6 +253,10 @@ fi
 
 if [ "${#TEST_FILTERS[@]}" -gt 0 ]; then
     print_status "xUnit query filters: ${TEST_FILTERS[*]}"
+fi
+
+if [ "${#AGE_VERSIONS[@]}" -gt 0 ]; then
+    print_status "AGE versions: ${AGE_VERSIONS[*]}"
 fi
 
 if [ ! -f "cvoya-graph.sln" ] || [ ! -d "tests" ]; then
@@ -329,8 +382,16 @@ fi
 
 if [ "$START_AGE" = true ]; then
     print_header "Starting Apache AGE"
-    ./scripts/containers/start-age.sh
-    export AGE_CONNECTION_STRING="${AGE_CONNECTION_STRING:-Host=localhost;Port=${AGE_PORT:-5455};Username=postgres;Password=postgres;Database=postgres}"
+    if [ "${#AGE_VERSIONS[@]}" -gt 1 ]; then
+        ./scripts/containers/start-age.sh all
+    elif [ "${#AGE_VERSIONS[@]}" -eq 1 ]; then
+        ./scripts/containers/start-age.sh "${AGE_VERSIONS[0]}"
+    else
+        ./scripts/containers/start-age.sh
+    fi
+    if [ "${#AGE_VERSIONS[@]}" -eq 0 ]; then
+        export AGE_CONNECTION_STRING="${AGE_CONNECTION_STRING:-Host=localhost;Port=${AGE_PORT:-5455};Username=postgres;Password=postgres;Database=postgres}"
+    fi
 fi
 
 if [ "$START_SEQ" = true ]; then
@@ -360,6 +421,7 @@ fi
 
 run_test_project() {
     local project="$1"
+    local slug_suffix="${2:-}"
     local project_name
     local slug
     local log_file
@@ -369,6 +431,9 @@ run_test_project() {
 
     project_name=$(basename "$project" .csproj)
     slug=$(printf '%s' "$project_name" | tr '[:upper:]' '[:lower:]' | tr '.' '-')
+    if [ -n "$slug_suffix" ]; then
+        slug="$slug-$slug_suffix"
+    fi
     log_file=$(mktemp "${TMPDIR:-/tmp}/cvoya-test-output.XXXXXX")
     command=(
         dotnet test
@@ -408,7 +473,7 @@ run_test_project() {
         command+=(--filter-query "${TEST_FILTERS[@]}")
     fi
 
-    print_header "Testing $project_name"
+    print_header "Testing $project_name${slug_suffix:+ ($slug_suffix)}"
     if ! "${command[@]}" 2>&1 | tee "$log_file"; then
         rm -f "$log_file"
         return 1
@@ -434,7 +499,39 @@ SELECTED_PROJECT_COUNT=0
 SELECTED_TEST_COUNT=0
 TEST_FAILURE=false
 
+run_age_project_for_versions() {
+    local project="$1"
+    local version
+    local version_slug
+    local failed=false
+
+    for version in "${AGE_VERSIONS[@]}"; do
+        export AGE_CONNECTION_STRING
+        AGE_CONNECTION_STRING=$(age_connection_string_for "$version")
+        version_slug=$(printf '%s' "$version" | tr '.' '-')
+        print_status "AGE_CONNECTION_STRING for AGE $version: $AGE_CONNECTION_STRING"
+        if ! run_test_project "$project" "age-$version_slug"; then
+            failed=true
+            if [ "$KEEP_GOING" = false ]; then
+                return 1
+            fi
+        fi
+    done
+
+    [ "$failed" = false ]
+}
+
 for project in "${SELECTED_PROJECTS[@]}"; do
+    project_name=$(basename "$project")
+    if [ "$project_name" = "Graph.Age.Tests.csproj" ] && [ "${#AGE_VERSIONS[@]}" -gt 0 ]; then
+        if ! run_age_project_for_versions "$project"; then
+            TEST_FAILURE=true
+            if [ "$KEEP_GOING" = false ]; then
+                exit 1
+            fi
+        fi
+        continue
+    fi
     if ! run_test_project "$project"; then
         TEST_FAILURE=true
         if [ "$KEEP_GOING" = false ]; then

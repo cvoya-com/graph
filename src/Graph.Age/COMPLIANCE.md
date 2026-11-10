@@ -140,7 +140,7 @@ inside one transaction. All-new endpoint creation distinguishes value-equal node
 self-loop, and caller-owned multi-statement operations roll back to an operation savepoint on any
 validation, cancellation, or database failure.
 
-## AGE 1.8 native-identity compatibility (NUL-88)
+## AGE 1.8 native-identity compatibility
 
 Apache AGE 1.8.0 / PostgreSQL 18.6 segfaults when `id()` is the left operand of `IN`, for
 example `MATCH (n) WHERE id(n) IN $ids`. Non-identity list membership (`node.Tags IN $list`,
@@ -167,7 +167,7 @@ The list-comprehension form preserves empty-list, deduplication, counting, order
 transaction semantics. Regression coverage lives in `AgeDialectTests`,
 `AgeFullTextSearchRewriterTests`, and `AgeListParameterRegressionTests`.
 
-## AGE 1.8 native shortest paths (NUL-89)
+## AGE 1.8 native shortest paths
 
 Apache AGE 1.8.0 exposes `ag_catalog.age_shortest_path` and `ag_catalog.age_all_shortest_paths`,
 but it still rejects the Cypher `shortestPath(...)` / `allShortestPaths(...)` pattern syntax. The
@@ -214,7 +214,7 @@ shortest-path provider tests plus the TCK contract and `OrderByEntity`).
 (failing clearly below AGE 1.8.0) or `Disabled` (keeping the pre-1.8 behavior on a newer server).
 The default `Auto` mode is what the capacity matrix below certifies.
 
-### AGE backing-store matrix (NUL-89)
+### AGE backing-store matrix
 
 | Run | Backing store | Runtime cases | Passed | Expected skips | Failed | `signal 11` | Container restarts |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -225,8 +225,7 @@ The default `Auto` mode is what the capacity matrix below certifies.
 Each container was created afresh from `apache/age:release_PG18_1.8.0` and
 `apache/age:release_PG18_1.7.0` and received the full AGE lane once. After every run, `docker logs`
 contained no `signal 11` or `terminated by signal`, `pg_isready` and `SELECT 1` succeeded, and the
-restart count stayed 0. Raw logs: `age18-combined.log`, `age18-combined-run2.log`, and
-`age17-combined.log`.
+restart count stayed 0. 
 
 | Prior strict run | Runtime cases | Passed | Expected skips | Failed | TRX |
 |---|---:|---:|---:|---:|---|
@@ -272,12 +271,22 @@ compatibility method inventory.
 
 ## Reproduction
 
-Start the repository-pinned providers:
+Start the repository-pinned providers. `start-age.sh` starts AGE 1.7.0 on port 5455 and AGE 1.8.0
+on port 5456, so the AGE suite can run against both released versions:
 
 ```bash
 ./scripts/containers/start-neo4j.sh
-./scripts/containers/start-age.sh
+./scripts/containers/start-age.sh all   # or: 1.7 | 1.8 to start a single version
 export AGE_CONNECTION_STRING='Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres'
+```
+
+Run the AGE provider suite against both AGE versions in one pass (`--age-versions` maps 1.7 to
+port 5455 and 1.8 to port 5456 and writes per-version TRX directories):
+
+```bash
+GRAPHMODEL_COMPLIANCE_STRICT=1 ./scripts/run-tests.sh --configuration Debug --lane age \
+  --project Graph.Age.Tests --age-versions 1.7.0,1.8.0 --disable-diff-engine --report-trx \
+  --results-directory artifacts/compliance/NUL-89/strict-age
 ```
 
 Run the retained strict evidence:

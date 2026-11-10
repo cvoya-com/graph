@@ -230,6 +230,77 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  age-provider-matrix:
+    name: AGE provider tests (AGE ${{ matrix.age }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.dotnet == 'true' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        age: ['1.7.0', '1.8.0']
+
+    services:
+      age:
+        image: apache/age:release_PG18_${{ matrix.age }}
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.x"
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            global.json
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build once for the AGE suite
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Run the AGE provider suite against AGE ${{ matrix.age }}
+        id: tests
+        shell: bash
+        env:
+          AGE_CONNECTION_STRING: Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres
+          GRAPHMODEL_COMPLIANCE_STRICT: "1"
+        run: |
+          ./scripts/run-tests.sh \
+            --configuration Release \
+            --lane age \
+            --no-build \
+            --disable-diff-engine \
+            --report-trx \
+            --results-directory "TestResults/age-${{ matrix.age }}"
+
+      - name: Upload AGE test results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: age-tests-${{ matrix.age }}
+          path: TestResults/age-${{ matrix.age }}/
+          retention-days: 14
+
   package-validation:
     name: Package validation (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -259,7 +330,7 @@ jobs:
   required-checks:
     name: Required checks
     runs-on: ubuntu-latest
-    needs: [changes, repository-tests, validation, package-validation]
+    needs: [changes, repository-tests, validation, age-provider-matrix, package-validation]
     if: ${{ always() }}
     timeout-minutes: 5
     permissions:
@@ -269,11 +340,13 @@ jobs:
       - name: Verify required jobs passed or were intentionally skipped
         shell: bash
         env:
+          AGE_MATRIX_RESULT: ${{ needs.age-provider-matrix.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           PACKAGE_VALIDATION_RESULT: ${{ needs.package-validation.result }}
           REPOSITORY_TESTS_RESULT: ${{ needs.repository-tests.result }}
           VALIDATION_RESULT: ${{ needs.validation.result }}
         run: |
+          echo "age-provider-matrix=$AGE_MATRIX_RESULT"
           echo "changes=$CHANGES_RESULT"
           echo "package-validation=$PACKAGE_VALIDATION_RESULT"
           echo "repository-tests=$REPOSITORY_TESTS_RESULT"
@@ -289,6 +362,10 @@ jobs:
           }
           [[ "$VALIDATION_RESULT" == "success" || "$VALIDATION_RESULT" == "skipped" ]] || {
             echo "::error::build, format, or tests failed"
+            exit 1
+          }
+          [[ "$AGE_MATRIX_RESULT" == "success" || "$AGE_MATRIX_RESULT" == "skipped" ]] || {
+            echo "::error::AGE provider matrix (1.7.0 and 1.8.0) failed"
             exit 1
           }
           [[ "$PACKAGE_VALIDATION_RESULT" == "success" || "$PACKAGE_VALIDATION_RESULT" == "skipped" ]] || {

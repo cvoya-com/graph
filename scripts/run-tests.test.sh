@@ -154,4 +154,29 @@ fi
 assert_no_command "build"
 assert_no_command "test"
 
+: > "$CALLS_FILE"
+run_runner --lane age --age-versions 1.7.0,1.8.0 --no-build
+
+age_runs=$(grep -c "test --project tests/Graph.Age.Tests/Graph.Age.Tests.csproj" "$CALLS_FILE")
+if [ "$age_runs" -ne 2 ]; then
+    echo "Expected the AGE project to run once per --age-versions entry (2 runs), got $age_runs." >&2
+    cat "$CALLS_FILE" >&2
+    exit 1
+fi
+
+assert_not_contains "Graph.Core.Tests.csproj"
+
+: > "$CALLS_FILE"
+run_runner --lane age --age-versions 1.8.0 --no-build --report-trx --results-directory TestResults
+
+assert_contains "--results-directory TestResults/graph-age-tests-age-1-8-0"
+
+: > "$CALLS_FILE"
+if run_runner --lane age --age-versions not-a-version --no-build; then
+    echo "Expected an invalid --age-versions value to be rejected." >&2
+    exit 1
+fi
+
+assert_no_command "test"
+
 echo "run-tests.sh tests passed"
