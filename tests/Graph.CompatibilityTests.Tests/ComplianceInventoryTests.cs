@@ -96,7 +96,9 @@ public sealed class ComplianceInventoryTests
     // +5 for #481/#498: one shared duplicate ordinary-Id creation contract plus four final
     // provider-boundary certifications for the identity-free public shape, ordinary Id/Direction
     // domain data, external native rows, and read-only no-provision behavior.
-    private const int ExpectedTotalTestMethods = 501;
+    // +1 for NUL-75: deleting a node that only has an incoming user relationship must preflight
+    // both directions (AGE 1.8 regression from the NUL-73 unidirectional fix).
+    private const int ExpectedTotalTestMethods = 502;
 
     [Fact]
     public void TotalTestMethods_MatchesKnownSuiteSize()
