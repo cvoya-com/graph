@@ -134,8 +134,7 @@ queries expand over the labels registered in the process (typed `[Node]` inherit
 `AgeGraphStore.RegisterLabelHierarchy`). A label created at runtime is not discovered, so its rows
 are silently omitted.
 
-**Solution:** register every physical child label before the first query, including every new
-`FormConfig` label version:
+**Solution:** register every physical child label before the first query:
 
 ```csharp
 AgeGraphStore.RegisterLabelHierarchy("Dokument", "Dokument_Typ13");
