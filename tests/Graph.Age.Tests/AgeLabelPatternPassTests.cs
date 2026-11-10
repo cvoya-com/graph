@@ -180,6 +180,30 @@ public sealed class AgeLabelPatternPassTests
     }
 
     [Fact]
+    public void FallbackKeepsEveryNativeLabelAlternativeAndCollapsesOnlyContainment()
+    {
+        // A hierarchy pattern [Root, Child] must keep both labels in the native labels()
+        // alternative (raw external :Child rows have no inheritance_labels), while the GIN
+        // containment terms collapse to the queried root.
+        AgeTypeHierarchyRegistry.Instance.Register("FallbackRoot582", "FallbackChild582");
+
+        var statement = Statement(
+            Match(optional: true, new NodePattern("src", ["FallbackRoot582", "FallbackChild582"])),
+            Return("src"));
+
+        var rendered = renderer.Render(expansion.Run(pass.Run(statement)));
+
+        Assert.DoesNotContain("UNION ALL", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'FallbackRoot582' IN labels(src)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'FallbackChild582' IN labels(src)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "properties(src) @> { inheritance_labels: ['FallbackRoot582'] }",
+            rendered.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("inheritance_labels: ['FallbackChild582']", rendered.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CollapsesPlannerExpandedHierarchyToTheQueriedRoot()
     {
         AgeTypeHierarchyRegistry.Instance.Register("CollapseRoot", "CollapseChild");
