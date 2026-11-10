@@ -838,16 +838,14 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             var projectionItems = projection.Items.ToList();
 
             // The wrapper regroups by projection columns, so every grouping key must still be
-            // projected. A projection that drops the key (Select(g => g.Count())) would merge all
-            // branches into a single group; keep that shape on the containment fallback.
+            // projected as a source variable. A projection that drops the key
+            // (Select(g => g.Count())) would merge all branches into a single group; keep that
+            // shape on the containment fallback. Only the projected VariableRef counts — an output
+            // alias like `new { __key = g.Count() }` collides with the planner's key alias without
+            // preserving the key.
             var projectedAliases = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in projection.Items)
             {
-                if (item.Alias is not null)
-                {
-                    projectedAliases.Add(item.Alias);
-                }
-
                 if (item.Expression is VariableRef variable)
                 {
                     projectedAliases.Add(variable.Alias);

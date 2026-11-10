@@ -318,13 +318,17 @@ internal sealed class AgeLabelPatternPass : ICypherPass
                                 // No single union expansion is possible here (for example two
                                 // typed nodes in one query, an OPTIONAL MATCH, or a global
                                 // aggregate). Keep the containment fallback. The planner expands
-                                // one queried type to its type plus every compatible subtype; the
-                                // queried root alone is enough because every compatible vertex
-                                // stores the full logical chain in inheritance_labels. Emitting
-                                // one containment term per subtype would multiply GIN index scans.
+                                // one queried type to its type plus every compatible subtype; for
+                                // the inheritance containment the queried root alone is enough
+                                // because every compatible provider-written vertex stores the full
+                                // logical chain in inheritance_labels, and one containment term per
+                                // subtype would multiply GIN index scans. The native labels()
+                                // alternative must keep every label though: a raw external :Derived
+                                // row has neither the base physical label nor that metadata.
                                 var logicalLabels = QueriedLabels(node.Labels);
                                 nodePredicates.Add(AgeElementMatcher.NodePredicate(
                                     new VariableRef(alias),
+                                    node.Labels,
                                     logicalLabels));
                             }
 

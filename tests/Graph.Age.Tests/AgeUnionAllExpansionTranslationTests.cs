@@ -160,6 +160,19 @@ public sealed class AgeUnionAllExpansionTranslationTests
     }
 
     [Fact]
+    public void GroupByWithCollidingOutputAlias_KeepsContainmentFallback()
+    {
+        // The output alias __key collides with the planner's grouping-key alias but only the count
+        // is projected; key preservation must be judged by the projected source variable.
+        var query = Nodes().GroupBy(contract => contract.Status).Select(group => new { __key = group.Count() });
+
+        var translated = Translate(query.Expression);
+
+        Assert.DoesNotContain("UNION ALL", translated.Text, StringComparison.Ordinal);
+        Assert.Null(translated.PostProcessing?.Aggregation);
+    }
+
+    [Fact]
     public void DistinctUnionOfHierarchyQuery_DoesNotExpandInsideTheUnion()
     {
         var query = Nodes().Select(contract => contract.Name);

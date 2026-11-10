@@ -37,6 +37,15 @@ public sealed class AgeLabelHierarchyValidationTests(AgeGraphCleanupFixture grap
     [Node("ValidationClrDerived582")]
     public record ValidationClrDerived582 : ValidationClrRoot582;
 
+    [Node("ValidationClrRoot583")]
+    public record ValidationClrRoot583 : Node
+    {
+        public string Name { get; set; } = string.Empty;
+    }
+
+    [Node("ValidationClrDerived583")]
+    public record ValidationClrDerived583 : ValidationClrRoot583;
+
     [Fact]
     public async Task UnregisteredChildLabel_IsReportedAndFailsStartup_UntilItIsRegistered()
     {
@@ -144,6 +153,39 @@ public sealed class AgeLabelHierarchyValidationTests(AgeGraphCleanupFixture grap
             () => failStore.CreateGraphIfNotExistsAsync(cancellationToken));
         Assert.Contains(missingChild, exception.Message, StringComparison.Ordinal);
         Assert.Contains("ValidationClrRoot582", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DirectInspection_ReportsUnregisteredPhysicalLabel_BeforeAnyGraphOperation()
+    {
+        // FindUnregisteredLabelHierarchyAsync is documented as safe at any time: it must not
+        // report a false clean snapshot just because no query or validation ran yet.
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var missingChild = $"ValidationClrMissing583_{Guid.NewGuid():N}";
+
+        var graphName = graphCleanup.CreateGraphName("cvoya_label_validation_direct");
+        await using var dataSource = CreateDataSource();
+        await using var setupStore = new AgeGraphStore(dataSource, graphName, loggerFactory: new CapturingLoggerProvider());
+        setupStore.LabelHierarchyValidation = AgeLabelHierarchyValidationMode.Off;
+        await setupStore.CreateGraphIfNotExistsAsync(cancellationToken);
+        graphCleanup.MarkGraphCreated(graphName);
+
+        await CreateVertexLabelAsync(dataSource, graphName, "ValidationClrRoot583", cancellationToken);
+        await CreateVertexLabelAsync(dataSource, graphName, missingChild, cancellationToken);
+        await InsertRowsAsync(
+            dataSource,
+            graphName,
+            missingChild,
+            ["ValidationClrRoot583", missingChild],
+            rowCount: 1,
+            cancellationToken);
+
+        await using var inspectStore = new AgeGraphStore(dataSource, graphName, loggerFactory: new CapturingLoggerProvider());
+        var findings = await inspectStore.FindUnregisteredLabelHierarchyAsync(cancellationToken);
+
+        var finding = Assert.Single(findings);
+        Assert.Equal(missingChild, finding.PhysicalLabel);
+        Assert.Equal("ValidationClrRoot583", finding.RegisteredAncestor);
     }
 
     private static NpgsqlDataSource CreateDataSource()

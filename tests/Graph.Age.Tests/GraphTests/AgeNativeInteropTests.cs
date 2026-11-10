@@ -40,6 +40,17 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
     }
 
+    [Node("Review582INative")]
+    public record Review582INative : Node
+    {
+        public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
+
+        public string Name { get; set; } = string.Empty;
+    }
+
+    [Node("Review582INativeDerived")]
+    public sealed record Review582INativeDerived : Review582INative;
+
     [Fact]
     public async Task RawNativeRowsWithoutCvoyaMetadata_AreTypedDynamicAndTraversable()
     {
@@ -114,6 +125,35 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
 
         Assert.Equal(2, rootCount);
         Assert.Equal("Native target", Assert.Single(traversed).Name);
+    }
+
+    [Fact]
+    public async Task MetadataFreeDerivedRow_SurvivesFallbackThroughSetOperation()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await Graph.CreateNodeAsync(
+            new Review582INative { Name = "582 base" },
+            cancellationToken: cancellationToken);
+        await Graph.CreateNodeAsync(
+            new Review582INativeDerived { Name = "582 derived" },
+            cancellationToken: cancellationToken);
+        // A raw native :Review582INativeDerived vertex has neither the base physical label nor
+        // inheritance_labels; the fallback must still match it through the derived native label.
+        await RunRawAsync(
+            """
+            CREATE (raw:Review582INativeDerived)
+            SET raw.Name = '582 raw derived'
+            RETURN true AS created
+            """,
+            new { },
+            cancellationToken);
+
+        var query = Graph.Nodes<Review582INative>().Select(node => node.Name);
+        var names = await query.Union(query).ToListAsync(cancellationToken);
+
+        Assert.Equal(
+            ["582 base", "582 derived", "582 raw derived"],
+            names.OrderBy(name => name, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]

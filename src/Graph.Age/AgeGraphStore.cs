@@ -138,6 +138,10 @@ public sealed class AgeGraphStore : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 
+        // Same CLR discovery as first-use validation: this inspection path is documented as safe
+        // at any time, so it must not report a false clean snapshot before any query ran.
+        AgeTypeHierarchyRegistry.Instance.DiscoverClrHierarchies();
+
         var knownLabels = AgeTypeHierarchyRegistry.Instance.GetKnownLabels();
         if (knownLabels.Count == 0)
         {

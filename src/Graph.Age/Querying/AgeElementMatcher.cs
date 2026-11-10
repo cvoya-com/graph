@@ -16,20 +16,27 @@ internal static class AgeElementMatcher
 
     internal static CypherExpression NodePredicate(
         CypherExpression target,
-        IReadOnlyList<string> labels) => new BinaryExpression(
+        IReadOnlyList<string> labels,
+        IReadOnlyList<string>? containmentLabels = null)
+    {
+        // Native rows carry the label directly and need no CVOYA metadata, so every label of the
+        // pattern must stay a labels() alternative — a raw :Derived vertex has neither the base
+        // physical label nor inheritance_labels. The containment terms can collapse to the
+        // queried root because provider-written rows store the full logical chain.
+        var containment = containmentLabels ?? labels;
+        return new BinaryExpression(
             CypherBinaryOperator.And,
             HierarchyNodePredicate(target),
             new BinaryExpression(
                 CypherBinaryOperator.Or,
-                // Native rows carry the label directly and need no CVOYA metadata; only rows with
-                // multiple logical labels store inheritance_labels.
                 Alternatives(
                     labels,
                     label => new BinaryExpression(
                         CypherBinaryOperator.In,
                         new Literal(label),
                         new FunctionCall("labels", [target]))),
-                Alternatives(labels, label => HierarchyPredicate(target, label))));
+                Alternatives(containment, label => HierarchyPredicate(target, label))));
+    }
 
     internal static CypherExpression RelationshipPredicate(
         CypherExpression target,
