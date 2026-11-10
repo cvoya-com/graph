@@ -130,14 +130,76 @@ public sealed class AgeUnionAllExpansionTranslationTests
         Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void MultiLabelPattern_MergesRuntimeRegisteredDescendantsIntoExpansion()
+    {
+        // The planner supplies [Review582Base, Review582Derived] for the CLR hierarchy; a runtime
+        // registration must still add its physical table to the expansion.
+        AgeTypeHierarchyRegistry.Instance.Register("Review582Base", "Review582RuntimeChild");
+
+        var query = Review582Nodes().Select(baseEntity => baseEntity.Name);
+        var translated = Translate(query.Expression, typeof(Review582Base));
+
+        Assert.Contains("MATCH (src:Review582Base)", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("MATCH (src:Review582Derived)", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("MATCH (src:Review582RuntimeChild)", translated.Text, StringComparison.Ordinal);
+        Assert.Equal(2, translated.Text.Split("UNION ALL", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void GroupByWithoutKeyInProjection_KeepsContainmentFallback()
+    {
+        // The wrapper can only regroup by projected key columns; dropping the key must not merge
+        // all branches into one group.
+        var query = Nodes().GroupBy(contract => contract.Status).Select(group => group.Count());
+
+        var translated = Translate(query.Expression);
+
+        Assert.DoesNotContain("UNION ALL", translated.Text, StringComparison.Ordinal);
+        Assert.Null(translated.PostProcessing?.Aggregation);
+    }
+
+    [Fact]
+    public void DistinctUnionOfHierarchyQuery_DoesNotExpandInsideTheUnion()
+    {
+        var query = Nodes().Select(contract => contract.Name);
+        var union = query.Union(query);
+
+        var translated = Translate(union.Expression);
+
+        Assert.Contains("UNION", translated.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION ALL", translated.Text, StringComparison.Ordinal);
+        Assert.Null(translated.PostProcessing);
+    }
+
+    [Fact]
+    public void SetOperationBranchWithPaging_IsNotExpandedAndLiftsNothing()
+    {
+        var branch = Nodes().OrderBy(contract => contract.Name).Take(1).Select(contract => contract.Name);
+        var combined = branch.Concat(branch);
+
+        var translated = Translate(combined.Expression);
+
+        Assert.Null(translated.PostProcessing);
+        Assert.DoesNotContain("__age_union_sort", translated.Text, StringComparison.Ordinal);
+        Assert.Equal(1, translated.Text.Split("UNION ALL", StringSplitOptions.None).Length - 1);
+    }
+
     private static IQueryable<Nul53Contract> Nodes() =>
         new AgeGraphStore(
             "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
             "nul53_translation").Graph.Nodes<Nul53Contract>();
 
-    private static CypherQuery Translate(System.Linq.Expressions.Expression expression)
+    private static IQueryable<Review582Base> Review582Nodes() =>
+        new AgeGraphStore(
+            "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
+            "review582_translation").Graph.Nodes<Review582Base>();
+
+    private static CypherQuery Translate(
+        System.Linq.Expressions.Expression expression,
+        Type? rootType = null)
     {
-        var visitor = new CypherQueryVisitor(typeof(Nul53Contract), hasComplexProperties: false);
+        var visitor = new CypherQueryVisitor(rootType ?? typeof(Nul53Contract), hasComplexProperties: false);
         visitor.Visit(expression);
         return visitor.Query;
     }
@@ -169,3 +231,12 @@ public record Nul53Kauf : Nul53Contract;
 
 [Node("Nul53Contract_Miete")]
 public record Nul53Miete : Nul53Kauf;
+
+[Node("Review582Base")]
+public record Review582Base : Node
+{
+    public string Name { get; set; } = string.Empty;
+}
+
+[Node("Review582Derived")]
+public record Review582Derived : Review582Base;

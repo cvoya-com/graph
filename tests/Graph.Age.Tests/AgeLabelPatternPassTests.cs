@@ -102,7 +102,7 @@ public sealed class AgeLabelPatternPassTests
             "properties(b) @> { inheritance_labels: ['FallbackC'] }",
             rendered.Text,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("'FallbackA' IN labels(a)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'FallbackA' IN labels(a)", rendered.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -156,7 +156,7 @@ public sealed class AgeLabelPatternPassTests
             "properties(src) @> { inheritance_labels: ['GroupedKaufvertrag'] }",
             rendered.Text,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("'GroupedContract' IN labels(src)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'GroupedContract' IN labels(src)", rendered.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("coalesce(src.inheritance_labels", rendered.Text, StringComparison.Ordinal);
         Assert.Contains("count(src) AS __a0", rendered.Text, StringComparison.Ordinal);
     }
@@ -176,7 +176,7 @@ public sealed class AgeLabelPatternPassTests
             "properties(src) @> { inheritance_labels: ['OptionalA'] }",
             rendered.Text,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("'OptionalA' IN labels(src)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'OptionalA' IN labels(src)", rendered.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -202,7 +202,7 @@ public sealed class AgeLabelPatternPassTests
             StringComparison.Ordinal);
         Assert.DoesNotContain("inheritance_labels: ['CollapseChild']", rendered.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("inheritance_labels: ['CollapseLeaf']", rendered.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain("'CollapseRoot' IN labels(src)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'CollapseRoot' IN labels(src)", rendered.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -314,7 +314,7 @@ public sealed class AgeLabelPatternPassTests
             "properties(src) @> { inheritance_labels: ['ScopedA'] }",
             rendered.Text,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("'ScopedA' IN labels(src)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'ScopedA' IN labels(src)", rendered.Text, StringComparison.Ordinal);
         Assert.Contains("src.Active = true", rendered.Text, StringComparison.Ordinal);
         Assert.Contains("MATCH (other)", rendered.Text, StringComparison.Ordinal);
         Assert.Contains(
@@ -353,7 +353,7 @@ public sealed class AgeLabelPatternPassTests
             "properties(tgt) @> { inheritance_labels: ['SubqueryB'] }",
             rendered.Text,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("'SubqueryA' IN labels(tgt)", rendered.Text, StringComparison.Ordinal);
+        Assert.Contains("'SubqueryA' IN labels(tgt)", rendered.Text, StringComparison.Ordinal);
         Assert.Contains("type(knows) = 'Knows'", rendered.Text, StringComparison.Ordinal);
     }
 

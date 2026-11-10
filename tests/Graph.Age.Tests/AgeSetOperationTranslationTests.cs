@@ -22,9 +22,11 @@ public sealed class AgeSetOperationTranslationTests
 
         Assert.Equal(2, translated.Text.Split('\n').Count(line =>
             string.Equals(line, "UNION", StringComparison.Ordinal)));
-        Assert.Equal(9, translated.Text.Split('\n').Count(line =>
+        // Branches of a set operation keep the containment fallback: expanding them would embed
+        // UNION ALL trees inside the outer UNION and break its duplicate-elimination scope.
+        Assert.Equal(3, translated.Text.Split('\n').Count(line =>
             line.StartsWith("RETURN { Node:", StringComparison.Ordinal)));
-        Assert.Equal(6, translated.Text.Split('\n').Count(line =>
+        Assert.Equal(0, translated.Text.Split('\n').Count(line =>
             string.Equals(line, "UNION ALL", StringComparison.Ordinal)));
     }
 
@@ -49,13 +51,13 @@ public sealed class AgeSetOperationTranslationTests
 
         var translated = Translate(query);
 
-        Assert.Equal(8, translated.Text.Split('\n').Count(line =>
+        Assert.Equal(2, translated.Text.Split('\n').Count(line =>
             string.Equals(line, "UNION ALL", StringComparison.Ordinal)));
         Assert.Equal(3, translated.Parameters.Keys.Count(name =>
             name.StartsWith("age_temporal_", StringComparison.Ordinal)));
         Assert.Equal(translated.Parameters.Count, translated.Parameters.Keys.Distinct(StringComparer.Ordinal).Count());
         Assert.DoesNotContain("duration(", translated.Text, StringComparison.Ordinal);
-        Assert.Equal(9, translated.Text.Split('\n').Count(line =>
+        Assert.Equal(3, translated.Text.Split('\n').Count(line =>
             string.Equals(line, "RETURN src.FirstName AS age_column_0", StringComparison.Ordinal)));
     }
 
@@ -84,7 +86,7 @@ public sealed class AgeSetOperationTranslationTests
 
         Assert.DoesNotContain("COUNT {", translated.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("EXISTS {", translated.Text, StringComparison.Ordinal);
-        Assert.Equal(6, translated.Text.Split('\n').Count(line =>
+        Assert.Equal(2, translated.Text.Split('\n').Count(line =>
             line.StartsWith("OPTIONAL MATCH", StringComparison.Ordinal) &&
             line.Contains("__age_count0", StringComparison.Ordinal)));
         Assert.Contains("'Manager' IN labels(src)", translated.Text, StringComparison.Ordinal);

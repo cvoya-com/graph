@@ -3,6 +3,7 @@
 
 namespace Cvoya.Graph.Age.Querying;
 
+using System.Reflection;
 using Cvoya.Graph;
 
 /// <summary>
@@ -38,6 +39,36 @@ internal sealed class AgeTypeHierarchyRegistry
 
     /// <summary>Gets the process-wide hierarchy registry.</summary>
     public static AgeTypeHierarchyRegistry Instance => LazyInstance.Value;
+
+    /// <summary>
+    /// Discovers every CLR <see cref="NodeAttribute"/> hierarchy in the loaded assemblies, without
+    /// touching any store schema registry. Used before first-use label validation so the known-label
+    /// snapshot includes CLR hierarchies that were never queried.
+    /// </summary>
+    public void DiscoverClrHierarchies()
+    {
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException exception)
+            {
+                types = exception.Types.Where(type => type is not null).Cast<Type>().ToArray();
+            }
+
+            foreach (var type in types)
+            {
+                if (typeof(INode).IsAssignableFrom(type) &&
+                    type.GetCustomAttributes(typeof(NodeAttribute), inherit: false).Length > 0)
+                {
+                    GetSubLabels(Labels.GetLabelFromType(type));
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Registers <paramref name="childLabel"/> as a direct subtype of <paramref name="parentLabel"/>.

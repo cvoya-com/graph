@@ -26,6 +26,20 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
     }
 
+    [Node("Review582Native")]
+    public sealed record Review582Native : Node
+    {
+        public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
+
+        public string Name { get; set; } = string.Empty;
+    }
+
+    [Relationship("REVIEW582_LINK")]
+    public sealed record Review582Link : Relationship
+    {
+        public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
+    }
+
     [Fact]
     public async Task RawNativeRowsWithoutCvoyaMetadata_AreTypedDynamicAndTraversable()
     {
@@ -70,6 +84,36 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         Assert.Single(relationships);
         Assert.Equal("KNOWS", relationships[0].Type);
         Assert.Equal("Raw target", Assert.Single(traversed).FirstName);
+    }
+
+    [Fact]
+    public async Task MetadataFreeNativeRows_MatchThroughLabelsInFallbackQueriesAndTraversal()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var marker = $"review582-{Guid.NewGuid():N}";
+        // Genuinely metadata-free external rows: no inheritance_labels, no CVOYA marker properties.
+        await RunRawAsync(
+            """
+            CREATE (source:Review582Native)
+            SET source.Name = $sourceName, source.marker = $marker
+            CREATE (target:Review582Native)
+            SET target.Name = $targetName, target.marker = $marker
+            CREATE (source)-[relationship:REVIEW582_LINK]->(target)
+            RETURN true AS created
+            """,
+            new { sourceName = "Native source", targetName = "Native target", marker },
+            cancellationToken);
+
+        var rootCount = await Graph.Nodes<Review582Native>()
+            .Where(node => node.Name != null && node.Name.StartsWith("Native", StringComparison.Ordinal))
+            .CountAsync(cancellationToken);
+        var traversed = await Graph.Nodes<Review582Native>()
+            .Where(node => node.Name == "Native source")
+            .Traverse<Review582Link, Review582Native>()
+            .ToListAsync(cancellationToken);
+
+        Assert.Equal(2, rootCount);
+        Assert.Equal("Native target", Assert.Single(traversed).Name);
     }
 
     [Fact]

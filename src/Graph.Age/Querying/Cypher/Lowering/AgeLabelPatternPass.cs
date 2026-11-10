@@ -17,6 +17,7 @@ internal sealed class AgeLabelPatternPass : ICypherPass
     private const string HopAlias = "age_hop";
 
     private readonly bool hasComplexProperties;
+    private readonly bool allowExpansion;
 
     /// <summary>Initializes a new pass.</summary>
     /// <param name="hasComplexProperties">
@@ -24,9 +25,15 @@ internal sealed class AgeLabelPatternPass : ICypherPass
     /// exists to keep provider-owned complex value nodes out of label-free matches, so a schema
     /// without complex properties does not need the correlated owner check.
     /// </param>
-    public AgeLabelPatternPass(bool hasComplexProperties = true)
+    /// <param name="allowExpansion">
+    /// Whether the statement may be expanded by <see cref="AgeUnionAllExpansionPass"/>. Branches of
+    /// an existing set operation must pass <see langword="false"/> so the label predicate stays on
+    /// the containment fallback and the outer set operation's semantics are preserved.
+    /// </param>
+    public AgeLabelPatternPass(bool hasComplexProperties = true, bool allowExpansion = true)
     {
         this.hasComplexProperties = hasComplexProperties;
+        this.allowExpansion = allowExpansion;
     }
 
     /// <inheritdoc />
@@ -38,7 +45,7 @@ internal sealed class AgeLabelPatternPass : ICypherPass
         var clauses = RewriteClauses(
             input.Clauses,
             aliasGenerator,
-            allowExpansion: true,
+            allowExpansion: allowExpansion,
             allowPostProcessing: true,
             out var changed);
         return changed
@@ -68,16 +75,18 @@ internal sealed class AgeLabelPatternPass : ICypherPass
             {
                 case SetOperationClause setOperation:
                     {
+                        // Nested set-operation branches are never expanded: the outer UNION's
+                        // duplicate-elimination scope would be broken by embedded UNION ALL trees.
                         var first = RewriteClauses(
                             setOperation.First,
                             aliasGenerator,
-                            allowExpansion: true,
+                            allowExpansion: false,
                             allowPostProcessing: false,
                             out var firstChanged);
                         var second = RewriteClauses(
                             setOperation.Second,
                             aliasGenerator,
-                            allowExpansion: true,
+                            allowExpansion: false,
                             allowPostProcessing: false,
                             out var secondChanged);
                         output.Add(firstChanged || secondChanged

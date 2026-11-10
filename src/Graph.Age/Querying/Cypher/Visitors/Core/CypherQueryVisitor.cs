@@ -37,11 +37,16 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         _hasComplexProperties = hasComplexProperties;
     }
 
-    private static CypherPassRunner CreateLoweringPasses(bool hasComplexProperties) => new(
+    private static CypherPassRunner CreateLoweringPasses(
+        bool hasComplexProperties,
+        bool inSetOperationBranch = false) => new(
     [
         new AgeRelationshipPredicatePass(),
         new AgeCorrelatedProjectionPass(),
-        new AgeLabelPatternPass(hasComplexProperties),
+        // A branch of an existing set operation must keep the containment fallback: expanding it
+        // would embed UNION ALL trees inside the outer UNION and discard the branch's lifted
+        // ordering/paging, which the execution wrapper cannot see.
+        new AgeLabelPatternPass(hasComplexProperties, allowExpansion: !inSetOperationBranch),
         // Label lowering adds marker-based root-isolation EXISTS predicates. AGE parses those
         // subqueries but evaluates them incorrectly, so run the pattern-subquery lowering again
         // after labels have introduced them. The emitted ownership matches are label-free and do
@@ -55,7 +60,7 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         // duplicate, and before set-operation projection normalization so the new branches get
         // identical column aliases. AgeLabelPatternPass keeps the selected pattern's labels in
         // MATCH for this pass.
-        new AgeUnionAllExpansionPass(),
+        new AgeUnionAllExpansionPass(allowExpansion: !inSetOperationBranch),
         new AgeSetOperationProjectionPass(),
     ]);
 
@@ -195,19 +200,23 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
 
     internal static CypherStatement LowerStatement(
         CypherStatement statement,
-        bool hasComplexProperties = true)
+        bool hasComplexProperties = true,
+        bool inSetOperationBranch = false)
     {
         if (!statement.Clauses.Any(clause => clause is SetOperationClause))
         {
-            return CreateLoweringPasses(hasComplexProperties).Run(statement);
+            return CreateLoweringPasses(hasComplexProperties, inSetOperationBranch).Run(statement);
         }
 
         // Each branch is a complete query and needs the whole chain. Running that chain again over
         // the assembled set operation would lower labels a second time and expand the already
         // expanded branches again, so only the cross-branch projection normalization runs here.
+        // Branches of the set operation are lowered with expansion disabled: the wrapper applies
+        // shaping only to the combined result, and the outer UNION's duplicate-elimination scope
+        // must stay intact.
         var branches = AgeClauseContainerTraversal.RunSetOperationBranches(
             statement,
-            branch => LowerStatement(branch, hasComplexProperties));
+            branch => LowerStatement(branch, hasComplexProperties, inSetOperationBranch: true));
         return SetOperationProjectionPass.Run(branches);
     }
 

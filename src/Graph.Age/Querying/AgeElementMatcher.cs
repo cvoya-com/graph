@@ -19,7 +19,17 @@ internal static class AgeElementMatcher
         IReadOnlyList<string> labels) => new BinaryExpression(
             CypherBinaryOperator.And,
             HierarchyNodePredicate(target),
-            Alternatives(labels, label => HierarchyPredicate(target, label)));
+            new BinaryExpression(
+                CypherBinaryOperator.Or,
+                // Native rows carry the label directly and need no CVOYA metadata; only rows with
+                // multiple logical labels store inheritance_labels.
+                Alternatives(
+                    labels,
+                    label => new BinaryExpression(
+                        CypherBinaryOperator.In,
+                        new Literal(label),
+                        new FunctionCall("labels", [target]))),
+                Alternatives(labels, label => HierarchyPredicate(target, label))));
 
     internal static CypherExpression RelationshipPredicate(
         CypherExpression target,

@@ -371,6 +371,12 @@ public sealed class AgeGraphStore : IAsyncDisposable
             return;
         }
 
+        // Populate the CLR hierarchies of every [Node] type first: GetKnownLabels() only reports
+        // labels that were already queried or explicitly registered, so without this step a fresh
+        // process would validate against an empty snapshot. Discovery scans the loaded assemblies
+        // directly and deliberately does not initialize the store's schema registry.
+        AgeTypeHierarchyRegistry.Instance.DiscoverClrHierarchies();
+
         var knownLabels = AgeTypeHierarchyRegistry.Instance.GetKnownLabels();
         if (knownLabels.Count == 0)
         {

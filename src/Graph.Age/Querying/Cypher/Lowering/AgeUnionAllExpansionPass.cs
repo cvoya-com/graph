@@ -63,13 +63,33 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
 
     private const string AverageCountColumnPrefix = "__age_union_avg_count";
 
+    private readonly bool allowExpansion;
+
+    /// <summary>Initializes a new pass.</summary>
+    /// <param name="allowExpansion">
+    /// Whether this statement may be expanded. Branches of an existing set operation must pass
+    /// <see langword="false"/>: embedding UNION ALL trees inside an outer UNION changes its
+    /// duplicate-elimination scope, and lifted ordering/paging of a branch is discarded because
+    /// the execution wrapper only sees the combined result.
+    /// </param>
+    public AgeUnionAllExpansionPass(bool allowExpansion = true)
+    {
+        this.allowExpansion = allowExpansion;
+    }
+
     /// <inheritdoc />
     public CypherStatement Run(CypherStatement input)
     {
         ArgumentNullException.ThrowIfNull(input);
 
+        if (!allowExpansion)
+        {
+            return input;
+        }
+
         var clauses = ExpandBranch(
             input.Clauses,
+            allowExpansion: true,
             allowPostProcessing: true,
             out var changed,
             out var postProcessing);
@@ -238,7 +258,29 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
 
         if (node.Labels.Count > 1)
         {
-            alternatives = node.Labels;
+            // The planner supplies the CLR hierarchy as alternatives. Runtime registrations still
+            // add physical tables, so merge every registered descendant of each supplied label;
+            // otherwise RegisterLabelHierarchy("Base", "RuntimeChild") would stay invisible when
+            // the planner already listed [Base, Derived].
+            var merged = new List<string>(node.Labels.Count);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var label in node.Labels)
+            {
+                if (seen.Add(label))
+                {
+                    merged.Add(label);
+                }
+
+                foreach (var subLabel in AgeTypeHierarchyRegistry.Instance.GetSubLabels(label))
+                {
+                    if (seen.Add(subLabel))
+                    {
+                        merged.Add(subLabel);
+                    }
+                }
+            }
+
+            alternatives = merged;
             return true;
         }
 
@@ -465,6 +507,7 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
     /// </summary>
     private static ICypherClause[] ExpandBranch(
         IReadOnlyList<ICypherClause> clauses,
+        bool allowExpansion,
         bool allowPostProcessing,
         out bool changed,
         out CypherPostProcessing? postProcessing)
@@ -481,15 +524,19 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
                 continue;
             }
 
-            // A nested set-operation branch cannot have its own lifted ordering or paging: the
-            // wrapper sees one combined result. Keep those branches on the containment fallback.
+            // A nested set-operation branch is never expanded: the outer UNION's distinct scope
+            // would be broken by embedded UNION ALL trees, and a branch cannot have its own lifted
+            // ordering or paging because the wrapper sees one combined result. Keep those
+            // branches on the containment fallback.
             var first = ExpandBranch(
                 setOperation.First,
+                allowExpansion: false,
                 allowPostProcessing: false,
                 out var firstChanged,
                 out _);
             var second = ExpandBranch(
                 setOperation.Second,
+                allowExpansion: false,
                 allowPostProcessing: false,
                 out var secondChanged,
                 out _);
@@ -499,7 +546,7 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             changed |= firstChanged || secondChanged;
         }
 
-        if (changed || SelectExpansion(clauses, allowPostProcessing) is not { } target)
+        if (changed || !allowExpansion || SelectExpansion(clauses, allowPostProcessing) is not { } target)
         {
             return output.ToArray();
         }
@@ -789,6 +836,32 @@ internal sealed class AgeUnionAllExpansionPass : ICypherPass
             var aggregates = new List<CypherPostAggregate>();
             var groupingItems = groupingStage.Items.ToList();
             var projectionItems = projection.Items.ToList();
+
+            // The wrapper regroups by projection columns, so every grouping key must still be
+            // projected. A projection that drops the key (Select(g => g.Count())) would merge all
+            // branches into a single group; keep that shape on the containment fallback.
+            var projectedAliases = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in projection.Items)
+            {
+                if (item.Alias is not null)
+                {
+                    projectedAliases.Add(item.Alias);
+                }
+
+                if (item.Expression is VariableRef variable)
+                {
+                    projectedAliases.Add(variable.Alias);
+                }
+            }
+
+            if (groupingStage.Items.Any(item =>
+                    !ContainsAggregate(item.Expression) &&
+                    item.Alias is not null &&
+                    !projectedAliases.Contains(item.Alias)))
+            {
+                return false;
+            }
+
             for (var index = 0; index < originalProjectionCount; index++)
             {
                 if (projection.Items[index].Expression is not VariableRef reference)
