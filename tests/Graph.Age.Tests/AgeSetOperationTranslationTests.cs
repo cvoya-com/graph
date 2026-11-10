@@ -22,9 +22,12 @@ public sealed class AgeSetOperationTranslationTests
 
         Assert.Equal(2, translated.Text.Split('\n').Count(line =>
             string.Equals(line, "UNION", StringComparison.Ordinal)));
+        // Branches of a set operation keep the containment fallback: expanding them would embed
+        // UNION ALL trees inside the outer UNION and break its duplicate-elimination scope.
         Assert.Equal(3, translated.Text.Split('\n').Count(line =>
             line.StartsWith("RETURN { Node:", StringComparison.Ordinal)));
-        Assert.DoesNotContain(":Person", translated.Text, StringComparison.Ordinal);
+        Assert.Equal(0, translated.Text.Split('\n').Count(line =>
+            string.Equals(line, "UNION ALL", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -83,7 +86,6 @@ public sealed class AgeSetOperationTranslationTests
 
         Assert.DoesNotContain("COUNT {", translated.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("EXISTS {", translated.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain(":Person", translated.Text, StringComparison.Ordinal);
         Assert.Equal(2, translated.Text.Split('\n').Count(line =>
             line.StartsWith("OPTIONAL MATCH", StringComparison.Ordinal) &&
             line.Contains("__age_count0", StringComparison.Ordinal)));

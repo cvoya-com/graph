@@ -51,6 +51,7 @@ An application that already owns its connection pool can pass an AGE-enabled
   complex-property subtrees and create-missing endpoint semantics;
 - complex-property persistence and cascading cleanup;
 - native logical AGE labels/types for model roots and catalog-vetted raw native data;
+- runtime label-hierarchy registration and first-use validation for FormConfig-driven labels;
 - write-scoped native label/type provisioning (ordinary reads perform no DDL);
 - scalar-key grouped aggregation through AGE-native `WITH` grouping and aggregate functions;
 - correlated collection projections and relationship/complex-collection counts, lowered to
@@ -82,6 +83,36 @@ explicit self-loop shapes. Caller-owned multi-statement commands are isolated be
 The public set-based mutation and endpoint-intent APIs use these native command paths without
 exposing graphids.
 
+### Runtime label hierarchies and startup validation
+
+Typed `[Node]` inheritance is discovered automatically from the loaded assemblies. Labels created
+at runtime have no CLR type, so the provider cannot discover them. Register every physical child
+label that can store a derived instance with
+`AgeGraphStore.RegisterLabelHierarchy(parentLabel, childLabel)` before the first query. A base-label query expands only over the
+registered hierarchy, so an unregistered physical label stays invisible even though its rows declare
+the base label in `inheritance_labels`.
+
+The provider checks the AGE catalog and the `inheritance_labels` of physical labels on the first
+graph operation (the explicit graph creation or the first read/write transaction). The behaviour is
+controlled by `AgeGraphStore.LabelHierarchyValidation`:
+
+- `Warn` (the default) logs one warning per unregistered physical label and continues.
+- `Fail` throws `GraphException` before the operation can commit.
+- `Off` disables the check.
+
+`FindUnregisteredLabelHierarchyAsync` returns the same findings without changing the registry, so an
+application can report them at startup. Registration is process-wide and additive; a registration
+made after the first operation is honoured by every subsequent query, but it does not re-run the
+automatic validation. Call `FindUnregisteredLabelHierarchyAsync` again, or restart the process, when
+labels can appear after startup.
+
+Detection uses the `inheritance_labels` property that the provider writes for nodes with multiple
+logical labels. A physical label whose rows do not declare the base label cannot be attributed to a
+hierarchy and is therefore not reported; such rows need their `inheritance_labels` fixed before the
+provider can include them in a base-label query. The provider deliberately does not auto-register
+discovered labels: a label name is data, and letting database contents silently extend the query
+surface would make the type model depend on what happens to be stored.
+
 ### Scalar-key grouped aggregation
 
 The shared planner represents scalar-key `GroupBy` as a structured `WITH` stage: the non-aggregate
@@ -91,6 +122,20 @@ The existing AGE AST passes then lower labels, reserved aliases, and empty sums 
 rewriting rendered Cypher. The supported and rejected shapes therefore match the provider-neutral
 `GroupByAggregation` contract; unsupported entity keys, element selectors, collection projections,
 and filters inside a group fail before database execution with the shared actionable diagnostic.
+
+### Label-hierarchy expansion and ordered paging
+
+A query on a base or intermediate label expands to one single-label `UNION ALL` branch per
+physical label table of the hierarchy. AGE attaches `ORDER BY`/`SKIP`/`LIMIT` after a `UNION` to
+the final branch instead of the combined result, so global paging and sorting are lifted into a
+structured SQL wrapper around `cypher()`: each branch is bounded to `skip + limit` rows (letting a
+B-tree index on the ordering property serve the per-branch top-N) and the wrapper applies the final
+order, offset, and limit. `DISTINCT` projections become `SELECT DISTINCT` over the union unless an
+ordering forces a distinct union, and grouped `Count`/`Sum` results merge per-branch partials with
+`sum`. Ordering by a property over a large hierarchy needs a B-tree expression index on the AGE
+accessor to still be fast; without one the union still avoids the former all-table scan, but
+PostgreSQL sorts every hierarchy row. `AgeQueryRunner` composes this wrapper from validated
+identifiers and integer paging values; it never edits rendered Cypher text.
 
 ### Correlated collections and pattern counts
 
@@ -125,6 +170,8 @@ Ordinary reads inline the PostgreSQL text-search predicate and require no manage
 or DDL permission. The final native AGE provider owns no index artifacts, so
 `RecreateManagedIndexesAsync` is a successful no-op: it performs no discovery, function creation,
 index creation, drop, rebuild, or graph provisioning. Existing PostgreSQL artifacts are untouched.
+Missing-property filters benefit from a caller-owned partial index; the SQL recipe and measured
+gate are documented in the performance guide (`docs/performance.md`).
 
 ## Local AGE
 

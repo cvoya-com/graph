@@ -4,7 +4,9 @@
 namespace Cvoya.Graph.Age;
 
 using Cvoya.Graph.Age.Core;
+using Cvoya.Graph.Age.Querying;
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
+using Cvoya.Graph.Age.Schema;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -84,6 +86,79 @@ public sealed class AgeGraphStore : IAsyncDisposable
 
     /// <summary>Gets the graph abstraction for this store.</summary>
     public IGraph Graph { get; }
+
+    /// <summary>
+    /// Gets or sets how the store handles physical node labels that belong to a registered label
+    /// hierarchy but were never registered themselves.
+    /// </summary>
+    /// <remarks>
+    /// The default is <see cref="AgeLabelHierarchyValidationMode.Warn"/>. Validation runs once per
+    /// store on the first graph operation (the explicit graph creation or the first read/write
+    /// transaction) and uses <see cref="AgeTypeHierarchyRegistry"/>'s current hierarchy snapshot.
+    /// Set this property before the first operation. Use
+    /// <see cref="FindUnregisteredLabelHierarchyAsync(CancellationToken)"/> to inspect an already
+    /// opened store at any time.
+    /// </remarks>
+    public AgeLabelHierarchyValidationMode LabelHierarchyValidation { get; set; } =
+        AgeLabelHierarchyValidationMode.Warn;
+
+    /// <summary>
+    /// Registers a runtime node-label hierarchy for a derived label that has no CLR type
+    /// </summary>
+    /// <param name="parentLabel">The label of the base logical type.</param>
+    /// <param name="childLabel">The label of the derived logical type.</param>
+    /// <remarks>
+    /// Registration is process-wide and additive. CLR <see cref="NodeAttribute"/> hierarchies are
+    /// discovered from the <see cref="SchemaRegistry"/> automatically when the graph is created.
+    /// Register every physical label that can store a derived instance before the first query;
+    /// otherwise base-label queries cannot see its rows. The provider reports missing registrations
+    /// according to <see cref="LabelHierarchyValidation"/>.
+    /// </remarks>
+    public static void RegisterLabelHierarchy(string parentLabel, string childLabel) =>
+        AgeTypeHierarchyRegistry.Instance.Register(parentLabel, childLabel);
+
+    /// <summary>
+    /// Finds physical node labels that store rows declaring a known hierarchy label but were never
+    /// registered with <see cref="RegisterLabelHierarchy(string, string)"/>.
+    /// </summary>
+    /// <param name="cancellationToken">A token that cancels the operation.</param>
+    /// <returns>
+    /// One finding per unregistered physical label, or an empty list when every physical label that
+    /// declares a known hierarchy label is registered. Findings are ordered by physical label and
+    /// registered ancestor.
+    /// </returns>
+    /// <remarks>
+    /// This method only inspects the graph; it never changes the hierarchy registry. Pass each
+    /// finding to <see cref="RegisterLabelHierarchy(string, string)"/> to make the missing rows
+    /// visible to base-label queries. It is safe to call at any time and independent of
+    /// <see cref="LabelHierarchyValidation"/>.
+    /// </remarks>
+    public async Task<IReadOnlyList<AgeLabelHierarchyFinding>> FindUnregisteredLabelHierarchyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+
+        // Same CLR discovery as first-use validation: this inspection path is documented as safe
+        // at any time, so it must not report a false clean snapshot before any query ran.
+        AgeTypeHierarchyRegistry.Instance.DiscoverClrHierarchies();
+
+        var knownLabels = AgeTypeHierarchyRegistry.Instance.GetKnownLabels();
+        if (knownLabels.Count == 0)
+        {
+            return [];
+        }
+
+        var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connectionLease = connection.ConfigureAwait(false);
+        return await AgeLabelHierarchyValidator
+            .FindUnregisteredAsync(
+                connection,
+                transaction: null,
+                GraphName,
+                knownLabels,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     /// <summary>Creates the configured AGE graph when it does not already exist.</summary>
     /// <param name="cancellationToken">A token that cancels the operation.</param>
@@ -204,6 +279,7 @@ public sealed class AgeGraphStore : IAsyncDisposable
             throw new GraphException($"Apache AGE graph '{GraphName}' does not exist.");
         }
 
+        await ValidateLabelHierarchyAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
         graphReady = true;
     }
 
@@ -275,7 +351,87 @@ public sealed class AgeGraphStore : IAsyncDisposable
             await CreateGraphAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
         }
 
+        await ValidateLabelHierarchyAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Applies <see cref="LabelHierarchyValidation"/> once for the graph's first operation.
+    /// </summary>
+    /// <remarks>
+    /// The validation runs against the same transaction as graph verification, so a failure in
+    /// <see cref="AgeLabelHierarchyValidationMode.Fail"/> mode prevents the operation (and, on the
+    /// provisioning path, the graph creation) from committing. A warning-mode inspection failure is
+    /// logged and does not turn an otherwise healthy graph operation into an error.
+    /// </remarks>
+    private async Task ValidateLabelHierarchyAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        var mode = LabelHierarchyValidation;
+        if (mode == AgeLabelHierarchyValidationMode.Off)
+        {
+            return;
+        }
+
+        // Populate the CLR hierarchies of every [Node] type first: GetKnownLabels() only reports
+        // labels that were already queried or explicitly registered, so without this step a fresh
+        // process would validate against an empty snapshot. Discovery scans the loaded assemblies
+        // directly and deliberately does not initialize the store's schema registry.
+        AgeTypeHierarchyRegistry.Instance.DiscoverClrHierarchies();
+
+        var knownLabels = AgeTypeHierarchyRegistry.Instance.GetKnownLabels();
+        if (knownLabels.Count == 0)
+        {
+            return;
+        }
+
+        IReadOnlyList<AgeLabelHierarchyFinding> findings;
+        try
+        {
+            findings = await AgeLabelHierarchyValidator
+                .FindUnregisteredAsync(
+                    connection,
+                    transaction,
+                    GraphName,
+                    knownLabels,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (mode == AgeLabelHierarchyValidationMode.Warn &&
+            exception is not OperationCanceledException)
+        {
+            LoggerFactory
+                .CreateLogger<AgeGraphStore>()
+                .LogWarningLabelHierarchyValidationFailed(exception);
+            return;
+        }
+
+        if (findings.Count == 0)
+        {
+            return;
+        }
+
+        var logger = LoggerFactory.CreateLogger<AgeGraphStore>();
+        foreach (var finding in findings)
+        {
+            logger.LogWarningUnregisteredLabelHierarchy(finding.PhysicalLabel, finding.RegisteredAncestor);
+        }
+
+        if (mode == AgeLabelHierarchyValidationMode.Fail)
+        {
+            var details = string.Join(
+                Environment.NewLine,
+                findings.Select(finding =>
+                    $"  - '{finding.PhysicalLabel}' stores rows that declare registered ancestor '{finding.RegisteredAncestor}'."));
+            throw new GraphException(
+                $"""
+                The AGE graph '{GraphName}' contains {findings.Count} physical node label(s) that are not registered in the runtime label hierarchy:
+                {details}
+                Base-label queries silently omit their rows. Register each label with AgeGraphStore.RegisterLabelHierarchy(parentLabel, childLabel) before the first query, or set LabelHierarchyValidation to Warn or Off.
+                """);
+        }
     }
 
     private async Task<bool> GraphExistsAsync(

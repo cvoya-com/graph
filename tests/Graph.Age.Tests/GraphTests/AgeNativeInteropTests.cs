@@ -26,6 +26,31 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
     }
 
+    [Node("Review582Native")]
+    public sealed record Review582Native : Node
+    {
+        public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
+
+        public string Name { get; set; } = string.Empty;
+    }
+
+    [Relationship("REVIEW582_LINK")]
+    public sealed record Review582Link : Relationship
+    {
+        public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
+    }
+
+    [Node("Review582INative")]
+    public record Review582INative : Node
+    {
+        public string TestKey { get; set; } = Guid.NewGuid().ToString("N");
+
+        public string Name { get; set; } = string.Empty;
+    }
+
+    [Node("Review582INativeDerived")]
+    public sealed record Review582INativeDerived : Review582INative;
+
     [Fact]
     public async Task RawNativeRowsWithoutCvoyaMetadata_AreTypedDynamicAndTraversable()
     {
@@ -34,9 +59,11 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         await RunRawAsync(
             """
             CREATE (source:Person)
-            SET source.FirstName = $sourceName, source.LastName = $marker, source.Age = 31
+            SET source.FirstName = $sourceName, source.LastName = $marker, source.Age = 31,
+                source.inheritance_labels = ['Person']
             CREATE (target:Person)
-            SET target.FirstName = $targetName, target.LastName = $marker, target.Age = 32
+            SET target.FirstName = $targetName, target.LastName = $marker, target.Age = 32,
+                target.inheritance_labels = ['Person']
             CREATE (source)-[relationship:KNOWS]->(target)
             SET relationship.Since = $since
             RETURN true AS created
@@ -68,6 +95,65 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
         Assert.Single(relationships);
         Assert.Equal("KNOWS", relationships[0].Type);
         Assert.Equal("Raw target", Assert.Single(traversed).FirstName);
+    }
+
+    [Fact]
+    public async Task MetadataFreeNativeRows_MatchThroughLabelsInFallbackQueriesAndTraversal()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var marker = $"review582-{Guid.NewGuid():N}";
+        // Genuinely metadata-free external rows: no inheritance_labels, no CVOYA marker properties.
+        await RunRawAsync(
+            """
+            CREATE (source:Review582Native)
+            SET source.Name = $sourceName, source.marker = $marker
+            CREATE (target:Review582Native)
+            SET target.Name = $targetName, target.marker = $marker
+            CREATE (source)-[relationship:REVIEW582_LINK]->(target)
+            RETURN true AS created
+            """,
+            new { sourceName = "Native source", targetName = "Native target", marker },
+            cancellationToken);
+
+        var rootCount = await Graph.Nodes<Review582Native>()
+            .Where(node => node.Name != null && node.Name.StartsWith("Native", StringComparison.Ordinal))
+            .CountAsync(cancellationToken);
+        var traversed = await Graph.Nodes<Review582Native>()
+            .Where(node => node.Name == "Native source")
+            .Traverse<Review582Link, Review582Native>()
+            .ToListAsync(cancellationToken);
+
+        Assert.Equal(2, rootCount);
+        Assert.Equal("Native target", Assert.Single(traversed).Name);
+    }
+
+    [Fact]
+    public async Task MetadataFreeDerivedRow_SurvivesFallbackThroughSetOperation()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await Graph.CreateNodeAsync(
+            new Review582INative { Name = "582 base" },
+            cancellationToken: cancellationToken);
+        await Graph.CreateNodeAsync(
+            new Review582INativeDerived { Name = "582 derived" },
+            cancellationToken: cancellationToken);
+        // A raw native :Review582INativeDerived vertex has neither the base physical label nor
+        // inheritance_labels; the fallback must still match it through the derived native label.
+        await RunRawAsync(
+            """
+            CREATE (raw:Review582INativeDerived)
+            SET raw.Name = '582 raw derived'
+            RETURN true AS created
+            """,
+            new { },
+            cancellationToken);
+
+        var query = Graph.Nodes<Review582INative>().Select(node => node.Name);
+        var names = await query.Union(query).ToListAsync(cancellationToken);
+
+        Assert.Equal(
+            ["582 base", "582 derived", "582 raw derived"],
+            names.OrderBy(name => name, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]
@@ -168,7 +254,7 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
                   (target:AtomicOrdinaryIdNode {ordinary_id: $targetId})
             RETURN head(labels(source)) AS sourceLabel,
                    type(relationship) AS relationshipType,
-                   source.inheritance_labels IS NULL AS noNodeHierarchy,
+                   source.inheritance_labels[0] AS nodeLabel,
                    source.__graphModelEntityKind__ IS NULL AS noEntityKind,
                    relationship.Type IS NULL AS noStoredType,
                    relationship.inheritance_labels IS NULL AS noRelationshipHierarchy,
@@ -183,7 +269,7 @@ public sealed class AgeNativeInteropTests(AgeHarness harness)
 
         Assert.Equal("AtomicOrdinaryIdNode", shape["sourceLabel"].As<string>());
         Assert.Equal("ATOMIC_MUTATION_RELATIONSHIP", shape["relationshipType"].As<string>());
-        Assert.True(shape["noNodeHierarchy"].As<bool>());
+        Assert.Equal("AtomicOrdinaryIdNode", shape["nodeLabel"].As<string>());
         Assert.True(shape["noEntityKind"].As<bool>());
         Assert.True(shape["noStoredType"].As<bool>());
         Assert.True(shape["noRelationshipHierarchy"].As<bool>());

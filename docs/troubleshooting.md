@@ -121,6 +121,33 @@ var users = await graph.Nodes<User>().ToListAsync();
        loggerFactory: loggerFactory);
    ```
 
+#### Problem: "Base-label queries miss rows from a newly created label" (Apache AGE)
+
+```csharp
+// Dokument has twelve registered FormConfig sub-labels, and a new Dokument_Typ13 exists
+var documents = await graph.Nodes<Dokument>().ToListAsync();
+// Returns the old count; the 5,000 rows in Dokument_Typ13 are missing
+```
+
+**Cause:** AGE stores every label in a separate table and has no parent-label metadata. Base-label
+queries expand over the labels registered in the process (typed `[Node]` inheritance plus
+`AgeGraphStore.RegisterLabelHierarchy`). A label created at runtime is not discovered, so its rows
+are silently omitted.
+
+**Solution:** register every physical child label before the first query:
+
+```csharp
+AgeGraphStore.RegisterLabelHierarchy("Dokument", "Dokument_Typ13");
+
+await using var store = new AgeGraphStore(connectionString, "my_graph");
+await store.CreateGraphIfNotExistsAsync();
+```
+
+The provider validates the catalog on the first graph operation. `AgeGraphStore.LabelHierarchyValidation`
+is `Warn` by default, so a missing registration appears as a warning instead of a silently smaller
+result. Set it to `Fail` to stop startup, or call
+`store.FindUnregisteredLabelHierarchyAsync()` to inspect the findings explicitly.
+
 #### Problem: "Invalid cast" when querying
 
 ```text

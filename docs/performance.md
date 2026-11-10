@@ -57,8 +57,10 @@ var allUsers = await graph.Nodes<User>().ToListAsync();
 var userCount = allUsers.Count;
 ```
 
-`Count`/`LongCount` and their async variants translate to a server-side `count(...)` aggregate.
-Treat `.ToList().Count` as forbidden in hot paths and large result sets.
+`Count`/`LongCount` and their async variants translate to `count(...)` in the provider. In the
+AGE provider a base-type count covers the registered label hierarchy and sums one count per
+physical label table (each vertex belongs to exactly one), so it does not double count. Treat
+`.ToList().Count` as forbidden in hot paths and large result sets.
 
 ### Efficient Relationship Traversal
 
@@ -76,6 +78,51 @@ var allConnections = await graph.Nodes<User>()
     .Traverse<FriendOf, Person>(minDepth: 1, maxDepth: 100) // Large depth limit
     .ToListAsync();
 ```
+
+### Missing-property filters (Apache AGE)
+
+AGE stores a null simple property by omitting its key from the `properties` map. The AGE provider
+therefore lowers `Where(entity => entity.Property == null)` to the key-existence predicate
+`NOT (properties(entity) ? 'Property')` instead of `entity.Property IS NULL`. The key-existence
+form avoids evaluating `agtype_access_operator` for every candidate row.
+
+A GIN index cannot answer the negated predicate. To turn the filter into an index-only scan,
+create a partial B-tree index on every physical label table that can hold the property:
+
+```sql
+CREATE INDEX "Kontakt_Person_Notiz_missing_idx"
+ON "qa_r1"."Kontakt_Person" (id)
+WHERE NOT (properties ? '"Notiz"'::ag_catalog.agtype);
+```
+
+The partial index contains only rows where the key is absent, so a filter that matches a minority
+of the table reads that index instead of scanning the whole label table. Run `VACUUM (ANALYZE)`
+(or rely on autovacuum) after a backfill so index-only scans see all-visible pages. A logical
+label with sublabels is expanded to separate `UNION ALL` branches, so create the index for each
+physical table returned by the label hierarchy.
+
+Do not rewrite `!= null` to the positive `?` form on AGE 1.8.0: the built-in `gin_agtype_ops`
+operator class binds the `?` strategy to the `agtype`-`agtype` operator while its query extractor
+reads a text key, so a positive `?` lookup through the GIN index returns no rows. The provider
+keeps the provider-neutral `IS NOT NULL` form for that direction.
+
+Measured on AGE 1.8.0 / PostgreSQL 18.6 with 180,000 `Kontakt_Person` rows and 54,000 missing
+`Notiz` keys (20 runs, 5 warm-ups, `max_parallel_workers_per_gather=0`):
+
+| Plan | Gate p95 | Result |
+|---|---:|---|
+| previous lowering, `src.Notiz IS NULL` | 59.61 ms | FAIL (> 50 ms) |
+| key-existence lowering, no partial index | 22.79 ms | PASS |
+| key-existence lowering plus partial index | 5.79 ms | PASS |
+
+A 50-run stability pass measured 72.71 ms for the previous lowering and 6.43 ms with the partial
+index, so the index also removes the cold-cache and load sensitivity seen in QA.
+
+The gate measures the provider-generated Cypher without entity materialization
+(`SELECT count(*) FROM (SELECT * FROM cypher(...)) s`). Full entity loading is a separate cost;
+see the materialization guidance above. A partial index favours existence/count filters: loading
+all matching entities fetches their heap rows individually, which can be slower than the
+sequential scan for a large match. Keep it for existence checks and narrow result sets.
 
 ### Pagination for Large Results
 

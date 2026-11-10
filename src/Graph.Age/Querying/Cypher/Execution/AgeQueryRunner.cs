@@ -12,6 +12,7 @@ using System.Text.RegularExpressions;
 using Cvoya.Graph.Age.Querying;
 using Cvoya.Graph.Age.Schema;
 using Cvoya.Graph.Age.Serialization;
+using Cvoya.Graph.Cypher.Ast;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -424,10 +425,18 @@ internal sealed partial class AgeQueryRunner
             """;
     }
 
+    public Task<AgeResultCursor> RunAsync(
+        string cypher,
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyList<string> projectionColumns,
+        CancellationToken cancellationToken) =>
+        RunAsync(cypher, parameters, projectionColumns, postProcessing: null, cancellationToken);
+
     public async Task<AgeResultCursor> RunAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
@@ -435,7 +444,7 @@ internal sealed partial class AgeQueryRunner
         ArgumentNullException.ThrowIfNull(projectionColumns);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var (command, distinct) = PrepareCommand(cypher, parameters, projectionColumns, streaming: false);
+        var (command, distinct) = PrepareCommand(cypher, parameters, projectionColumns, postProcessing, streaming: false);
         await using var commandLease = command.ConfigureAwait(false);
 
         try
@@ -561,10 +570,18 @@ internal sealed partial class AgeQueryRunner
         }
     }
 
+    public Task<AgeResultCursor> RunStreamingAsync(
+        string cypher,
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyList<string> projectionColumns,
+        CancellationToken cancellationToken) =>
+        RunStreamingAsync(cypher, parameters, projectionColumns, postProcessing: null, cancellationToken);
+
     public async Task<AgeResultCursor> RunStreamingAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
@@ -572,7 +589,7 @@ internal sealed partial class AgeQueryRunner
         ArgumentNullException.ThrowIfNull(projectionColumns);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var (command, distinct) = PrepareCommand(cypher, parameters, projectionColumns, streaming: true);
+        var (command, distinct) = PrepareCommand(cypher, parameters, projectionColumns, postProcessing, streaming: true);
 
         try
         {
@@ -602,11 +619,12 @@ internal sealed partial class AgeQueryRunner
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
         bool streaming)
     {
         var (normalizedCypher, effectiveColumns, distinct) = NormalizeCommand(cypher, projectionColumns);
         cypher = normalizedCypher;
-        var command = CreateCommand(cypher, parameters, effectiveColumns);
+        var command = CreateCommand(cypher, parameters, effectiveColumns, postProcessing);
         if (streaming)
         {
             logger.LogDebugAgeQueryRunner159(parameters.Count, effectiveColumns.Count, cypher);
@@ -666,9 +684,10 @@ internal sealed partial class AgeQueryRunner
     private NpgsqlCommand CreateCommand(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
-        IReadOnlyList<string> projectionColumns)
+        IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing = null)
     {
-        var definition = CreateCommandDefinition(cypher, parameters, projectionColumns);
+        var definition = CreateCommandDefinition(cypher, parameters, projectionColumns, postProcessing);
         var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = definition.CommandText;
@@ -679,24 +698,17 @@ internal sealed partial class AgeQueryRunner
     private (string CommandText, NpgsqlParameter AgtypeParameter) CreateCommandDefinition(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
-        IReadOnlyList<string> projectionColumns)
+        IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing = null)
     {
-        var quoteTag = ChooseDollarQuoteTag(cypher);
-        var columnDefinitions = string.Join(", ", projectionColumns.Select(column =>
-            $"{AgeSqlIdentifier.Quote(column, "projection column")} agtype"));
-        // The columns stay agtype end-to-end: a text cast would go through agtype_value_to_text,
-        // which rejects top-level vertex/edge/path scalars (bare relationship projections).
-        var resultColumns = string.Join(", ", projectionColumns.Select(column =>
-        {
-            var quoted = AgeSqlIdentifier.Quote(column, "projection column");
-            return $"age_result.{quoted}";
-        }));
         var serializedParameters = JsonSerializer.Serialize(
             parameters.ToDictionary(pair => pair.Key, pair => NormalizeParameter(pair.Value), StringComparer.Ordinal));
-
-        var commandText =
-            $"SELECT {resultColumns} FROM ag_catalog.cypher('{graphName}', {quoteTag}{cypher}{quoteTag}, @agtypeParams) " +
-            $"AS age_result ({columnDefinitions})";
+        var commandText = BuildCommandText(
+            graphName,
+            cypher,
+            projectionColumns,
+            postProcessing,
+            parameterPlaceholder: "@agtypeParams");
         var parameter = new NpgsqlParameter
         {
             ParameterName = "agtypeParams",
@@ -705,6 +717,187 @@ internal sealed partial class AgeQueryRunner
         };
         return (commandText, parameter);
     }
+
+    /// <summary>
+    /// Builds the SQL that executes one lowered Cypher statement and applies the row shaping the
+    /// AGE Cypher grammar cannot express after a union.
+    /// </summary>
+    /// <remarks>
+    /// Exposed to the test assembly so the query-shape tests can assert the exact statement sent to
+    /// PostgreSQL without opening a connection.
+    /// </remarks>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Security",
+        "CA2100:Review SQL queries for security vulnerabilities",
+        Justification = "graphName, columns, and generated sort columns are validated identifiers; paging values are integers produced by the planner.")]
+    internal static string BuildCommandText(
+        string graphName,
+        string cypher,
+        IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
+        string parameterPlaceholder = "@agtypeParams")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(graphName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
+        ArgumentNullException.ThrowIfNull(projectionColumns);
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameterPlaceholder);
+
+        if (projectionColumns.Count == 0)
+        {
+            throw new GraphException("AGE query execution requires at least one projection column.");
+        }
+
+        if (postProcessing is not null &&
+            (postProcessing.ResultColumnCount < 0 ||
+             postProcessing.ResultColumnCount > projectionColumns.Count))
+        {
+            throw new GraphException(
+                "AGE post-processing result column count is outside the rendered projection.");
+        }
+
+        if (postProcessing is not null &&
+            (postProcessing.Sort.Any(sort =>
+                sort.ColumnIndex < 0 || sort.ColumnIndex >= projectionColumns.Count) ||
+             postProcessing.Aggregation is { } aggregatePlan &&
+             (aggregatePlan.GroupColumnIndexes.Any(index =>
+                  index < 0 || index >= postProcessing.ResultColumnCount) ||
+              aggregatePlan.Aggregates.Any(aggregate =>
+                  aggregate.ColumnIndex < 0 ||
+                  aggregate.ColumnIndex >= postProcessing.ResultColumnCount ||
+                  (aggregate.AuxiliaryColumnIndex is { } auxiliary &&
+                   (auxiliary < 0 || auxiliary >= projectionColumns.Count))))))
+        {
+            throw new GraphException(
+                "AGE post-processing column index is outside the rendered projection.");
+        }
+
+        var quoteTag = ChooseDollarQuoteTag(cypher);
+        var validatedGraphName = AgeSqlIdentifier.Validate(graphName, "graph name");
+        var columnDefinitions = string.Join(", ", projectionColumns.Select(column =>
+            $"{AgeSqlIdentifier.Quote(column, "projection column")} agtype"));
+        var source =
+            $"FROM ag_catalog.cypher('{validatedGraphName}', " +
+            $"{quoteTag}{cypher}{quoteTag}, {parameterPlaceholder}) AS age_result ({columnDefinitions})";
+
+        if (postProcessing is null)
+        {
+            var allColumns = string.Join(", ", projectionColumns.Select(column =>
+                $"age_result.{AgeSqlIdentifier.Quote(column, "projection column")}"));
+            return $"SELECT {allColumns} {source}";
+        }
+
+        var resultCount = postProcessing.ResultColumnCount;
+        var selectList = new List<string>(resultCount);
+        if (postProcessing.Aggregation is { } aggregation)
+        {
+            for (var index = 0; index < resultCount; index++)
+            {
+                var quoted = AgeSqlIdentifier.Quote(projectionColumns[index], "projection column");
+                var combine = aggregation.Aggregates.FirstOrDefault(aggregate =>
+                    aggregate.ColumnIndex == index);
+                selectList.Add(combine is null
+                    ? $"age_result.{quoted}"
+                    : $"{RenderAggregateCombine(combine, quoted, projectionColumns)} AS {quoted}");
+            }
+        }
+        else
+        {
+            for (var index = 0; index < resultCount; index++)
+            {
+                selectList.Add(
+                    $"age_result.{AgeSqlIdentifier.Quote(projectionColumns[index], "projection column")}");
+            }
+        }
+
+        var commandText = postProcessing.Distinct
+            ? $"SELECT DISTINCT {string.Join(", ", selectList)} {source}"
+            : $"SELECT {string.Join(", ", selectList)} {source}";
+
+        if (postProcessing.Aggregation is { } grouping)
+        {
+            if (grouping.GroupColumnIndexes.Count > 0)
+            {
+                commandText += " GROUP BY " + string.Join(", ", grouping.GroupColumnIndexes.Select(index =>
+                    $"age_result.{AgeSqlIdentifier.Quote(projectionColumns[index], "projection column")}"));
+            }
+        }
+        else if (postProcessing.Sort.Count > 0)
+        {
+            commandText += " ORDER BY " + string.Join(", ", postProcessing.Sort.Select(sort =>
+            {
+                var quoted = AgeSqlIdentifier.Quote(projectionColumns[sort.ColumnIndex], "projection column");
+                return $"age_result.{quoted}{(sort.Descending ? " DESC" : " ASC")}";
+            }));
+        }
+
+        if (postProcessing.Skip is { } skip)
+        {
+            commandText += $" OFFSET {skip}";
+        }
+
+        if (postProcessing.Limit is { } limit)
+        {
+            commandText += $" LIMIT {limit}";
+        }
+
+        return commandText;
+    }
+
+    /// <summary>
+    /// Builds the SQL expression that merges one partial aggregate column across union branches.
+    /// </summary>
+    /// <remarks>
+    /// The merge is type-aware where AGE's agtype comparison is required:
+    /// <list type="bullet">
+    /// <item><description><c>sum</c>/<c>count</c> are numeric and add.</description></item>
+    /// <item><description><c>avg</c> combines a partial sum with a partial non-null count.</description></item>
+    /// <item><description><c>min</c>/<c>max</c> use the AGE agtype comparison aggregates, so numbers,
+    /// strings, booleans, and temporals keep their agtype ordering.</description></item>
+    /// </list>
+    /// </remarks>
+    private static string RenderAggregateCombine(
+        CypherPostAggregate aggregate,
+        string quotedColumn,
+        IReadOnlyList<string> projectionColumns)
+    {
+        switch (aggregate.Function.ToLowerInvariant())
+        {
+            case "sum":
+                return $"sum((age_result.{quotedColumn})::text::numeric)::text::ag_catalog.agtype";
+
+            case "avg":
+                if (aggregate.AuxiliaryColumnIndex is not { } countIndex ||
+                    countIndex < 0 || countIndex >= projectionColumns.Count)
+                {
+                    throw new GraphException(
+                        "AGE average post-processing requires a partial-count column.");
+                }
+
+                var quotedCount = AgeSqlIdentifier.Quote(
+                    projectionColumns[countIndex],
+                    "projection column");
+                return "(" +
+                    $"sum((age_result.{quotedColumn})::text::numeric) / " +
+                    $"NULLIF(sum((age_result.{quotedCount})::text::numeric), 0)" +
+                    ")::text::ag_catalog.agtype";
+
+            case "min":
+                return $"ag_catalog.age_min(age_result.{quotedColumn})";
+
+            case "max":
+                return $"ag_catalog.age_max(age_result.{quotedColumn})";
+
+            default:
+                throw new GraphException(
+                    $"AGE post-processing does not support aggregate merge '{aggregate.Function}'.");
+        }
+    }
+
+    /// <summary>Normalizes a command for query-shape tests.</summary>
+    internal static (string Cypher, IReadOnlyList<string> Columns, bool Distinct) NormalizeCommandForTesting(
+        string cypher,
+        IReadOnlyList<string> projectionColumns) =>
+        NormalizeCommand(cypher, projectionColumns);
 
     internal static async Task<AgeRecord> ReadRecordAsync(
         DbDataReader reader,

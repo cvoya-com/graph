@@ -15,17 +15,23 @@ public sealed class AgeLabelFilterTranslationTests
             "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
             "translation");
         var query = store.Graph.Nodes<Person>()
-            .OfLabels(GraphLabelMatch.Any, "Manager", "Contractor")
+            .OfLabels(GraphLabelMatch.Any, "Contractor", "Freelancer")
             .OfLabels(GraphLabelMatch.All, "Active", "Verified");
 
         var visitor = new CypherQueryVisitor(query.ElementType);
         visitor.Visit(query.Expression);
         var text = visitor.Query.Text;
 
-        Assert.Contains("'Manager' IN labels(src)", text, StringComparison.Ordinal);
         Assert.Contains("'Contractor' IN labels(src)", text, StringComparison.Ordinal);
+        Assert.Contains("'Freelancer' IN labels(src)", text, StringComparison.Ordinal);
         Assert.Contains("'Active' IN labels(src)", text, StringComparison.Ordinal);
         Assert.Contains("'Verified' IN labels(src)", text, StringComparison.Ordinal);
-        Assert.DoesNotContain(":Manager", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "properties(src) @> { inheritance_labels: ['Contractor'] }",
+            text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("coalesce(src.inheritance_labels", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(":Contractor", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(":Freelancer", text, StringComparison.Ordinal);
     }
 }

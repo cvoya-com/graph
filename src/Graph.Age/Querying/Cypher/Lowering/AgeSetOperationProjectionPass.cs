@@ -4,6 +4,7 @@
 namespace Cvoya.Graph.Age.Querying.Cypher.Lowering;
 
 using Cvoya.Graph.Cypher.Ast;
+using Cvoya.Graph.Cypher.Ast.Expressions;
 using Cvoya.Graph.Cypher.Validation;
 
 /// <summary>Normalizes every leaf projection in an AGE set-operation tree to one rendered shape.</summary>
@@ -17,6 +18,9 @@ internal sealed class AgeSetOperationProjectionPass : ICypherPass
         var clauses = RewriteContainers(input.Clauses, ref changed);
         return changed
             ? new CypherStatement(clauses, input.Parameters, input.PathTypes)
+            {
+                PostProcessing = input.PostProcessing,
+            }
             : input;
     }
 
@@ -49,7 +53,9 @@ internal sealed class AgeSetOperationProjectionPass : ICypherPass
     {
         var projection = FindFirstLeafProjection(clauses);
         return projection.Items
-            .Select((item, index) => item.Alias ?? $"age_column_{index}")
+            .Select((item, index) => item.Alias ??
+                (item.Expression as VariableRef)?.Alias ??
+                $"age_column_{index}")
             .ToArray();
     }
 
@@ -99,7 +105,20 @@ internal sealed class AgeSetOperationProjectionPass : ICypherPass
                     }
 
                     var items = projection.Items
-                        .Select((item, itemIndex) => new ReturnItem(item.Expression, aliases[itemIndex]))
+                        .Select((item, itemIndex) =>
+                        {
+                            // A variable that already renders as the target alias needs no
+                            // explicit alias. Keeping the original item also keeps a grouped
+                            // key projection readable instead of emitting "__key AS __key".
+                            if (item.Alias is null &&
+                                item.Expression is VariableRef variable &&
+                                string.Equals(variable.Alias, aliases[itemIndex], StringComparison.Ordinal))
+                            {
+                                return item;
+                            }
+
+                            return new ReturnItem(item.Expression, aliases[itemIndex]);
+                        })
                         .ToArray();
                     changed |= items.Where((item, itemIndex) =>
                         !string.Equals(item.Alias, projection.Items[itemIndex].Alias, StringComparison.Ordinal)).Any();

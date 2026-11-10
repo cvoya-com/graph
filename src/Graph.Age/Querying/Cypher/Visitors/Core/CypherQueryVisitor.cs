@@ -11,17 +11,42 @@ using Cvoya.Graph.Cypher.Planning;
 using Cvoya.Graph.Cypher.Validation;
 using Cvoya.Graph.Querying;
 using Microsoft.Extensions.Logging;
+using AstFunctionCall = Cvoya.Graph.Cypher.Ast.Expressions.FunctionCall;
 
 /// <summary>
 /// Compatibility adapter that runs the shared semantic-model, planner, and Age renderer pipeline.
 /// </summary>
 internal sealed class CypherQueryVisitor : ExpressionVisitor
 {
-    private static readonly CypherPassRunner LoweringPasses = new(
+    private static readonly CypherPassRunner SetOperationProjectionPass = new(
+    [
+        new AgeSetOperationProjectionPass(),
+    ]);
+
+    private readonly Type _rootType;
+    private readonly ILogger<CypherQueryVisitor>? _logger;
+    private readonly bool _hasComplexProperties;
+
+    public CypherQueryVisitor(
+        Type type,
+        ILoggerFactory? loggerFactory = null,
+        bool hasComplexProperties = true)
+    {
+        _rootType = type ?? throw new ArgumentNullException(nameof(type));
+        _logger = loggerFactory?.CreateLogger<CypherQueryVisitor>();
+        _hasComplexProperties = hasComplexProperties;
+    }
+
+    private static CypherPassRunner CreateLoweringPasses(
+        bool hasComplexProperties,
+        bool inSetOperationBranch = false) => new(
     [
         new AgeRelationshipPredicatePass(),
         new AgeCorrelatedProjectionPass(),
-        new AgeLabelPatternPass(),
+        // A branch of an existing set operation must keep the containment fallback: expanding it
+        // would embed UNION ALL trees inside the outer UNION and discard the branch's lifted
+        // ordering/paging, which the execution wrapper cannot see.
+        new AgeLabelPatternPass(hasComplexProperties, allowExpansion: !inSetOperationBranch),
         // Label lowering adds marker-based root-isolation EXISTS predicates. AGE parses those
         // subqueries but evaluates them incorrectly, so run the pattern-subquery lowering again
         // after labels have introduced them. The emitted ownership matches are label-free and do
@@ -31,17 +56,13 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         new AgeTemporalParameterArithmeticPass(),
         new AgeInlineComplexPropertyProjectionPass(),
         new AgeEntityProjectionPass(),
+        // Runs after projection lowering so every branch already ends in a RETURN it can
+        // duplicate, and before set-operation projection normalization so the new branches get
+        // identical column aliases. AgeLabelPatternPass keeps the selected pattern's labels in
+        // MATCH for this pass.
+        new AgeUnionAllExpansionPass(allowExpansion: !inSetOperationBranch),
         new AgeSetOperationProjectionPass(),
     ]);
-
-    private readonly Type _rootType;
-    private readonly ILogger<CypherQueryVisitor>? _logger;
-
-    public CypherQueryVisitor(Type type, ILoggerFactory? loggerFactory = null)
-    {
-        _rootType = type ?? throw new ArgumentNullException(nameof(type));
-        _logger = loggerFactory?.CreateLogger<CypherQueryVisitor>();
-    }
 
     public CypherQuery Query { get; private set; } = CypherQuery.Empty;
 
@@ -54,12 +75,15 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
 
         _logger?.LogDebugCypherQueryVisitor36(_rootType);
         CypherStatement statement;
+        var sumUnionCountBranches = false;
         try
         {
             WholeEntityOrderingValidator.Validate(node, AgeDialect.Instance);
             var model = GraphQueryModelBuilder.Build(node);
             statement = new CypherQueryPlanner(AgeDialect.PlanningInstance).Plan(model);
-            statement = LowerStatement(statement);
+            statement = LowerStatement(statement, _hasComplexProperties);
+            sumUnionCountBranches = model.Terminal == TerminalOperation.Count &&
+                IsUnionOfGlobalCounts(statement.Clauses);
         }
         catch (GraphQueryTranslationException exception)
         {
@@ -73,7 +97,13 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         (Type Source, Type Relationship, Type Target)? pathTypes = statement.PathTypes is null
             ? null
             : (statement.PathTypes.Source, statement.PathTypes.Relationship, statement.PathTypes.Target);
-        Query = new CypherQuery(rendered.Text, rendered.Parameters, pathTypes, projectionColumns);
+        Query = new CypherQuery(
+            rendered.Text,
+            rendered.Parameters,
+            pathTypes,
+            projectionColumns,
+            statement.PostProcessing,
+            sumUnionCountBranches);
         if (_logger?.IsEnabled(LogLevel.Debug) == true)
         {
             _logger.LogDebugCypherQueryVisitor53(Query.Parameters.Keys.ToArray(), Query.Parameters.Count);
@@ -136,10 +166,58 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         }
     }
 
-    internal static CypherStatement LowerStatement(CypherStatement statement)
+    /// <summary>
+    /// Gets whether the lowered statement is a UNION ALL whose every leaf returns exactly one
+    /// global <c>count(...)</c>. The AGE provider sums those disjoint per-label counts client-side
+    /// into the single scalar a LINQ count terminal expects.
+    /// </summary>
+    private static bool IsUnionOfGlobalCounts(IReadOnlyList<ICypherClause> clauses)
     {
-        var branches = AgeClauseContainerTraversal.RunSetOperationBranches(statement, LowerStatement);
-        return LoweringPasses.Run(branches);
+        var hasSetOperation = false;
+        foreach (var clause in clauses)
+        {
+            if (clause is not SetOperationClause setOperation)
+            {
+                continue;
+            }
+
+            hasSetOperation = true;
+            if (!IsUnionOfGlobalCounts(setOperation.First) ||
+                !IsUnionOfGlobalCounts(setOperation.Second))
+            {
+                return false;
+            }
+        }
+
+        if (hasSetOperation)
+        {
+            return true;
+        }
+
+        return clauses.OfType<ReturnClause>().LastOrDefault() is { Items.Count: 1 } projection &&
+            projection.Items[0].Expression is AstFunctionCall { Name: "count", Arguments.Count: 1 };
+    }
+
+    internal static CypherStatement LowerStatement(
+        CypherStatement statement,
+        bool hasComplexProperties = true,
+        bool inSetOperationBranch = false)
+    {
+        if (!statement.Clauses.Any(clause => clause is SetOperationClause))
+        {
+            return CreateLoweringPasses(hasComplexProperties, inSetOperationBranch).Run(statement);
+        }
+
+        // Each branch is a complete query and needs the whole chain. Running that chain again over
+        // the assembled set operation would lower labels a second time and expand the already
+        // expanded branches again, so only the cross-branch projection normalization runs here.
+        // Branches of the set operation are lowered with expansion disabled: the wrapper applies
+        // shaping only to the combined result, and the outer UNION's duplicate-elimination scope
+        // must stay intact.
+        var branches = AgeClauseContainerTraversal.RunSetOperationBranches(
+            statement,
+            branch => LowerStatement(branch, hasComplexProperties, inSetOperationBranch: true));
+        return SetOperationProjectionPass.Run(branches);
     }
 
     private static Exception PreserveProviderException(GraphQueryTranslationException exception)

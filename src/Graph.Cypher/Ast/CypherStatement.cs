@@ -52,6 +52,16 @@ public sealed record CypherStatement
     /// <summary>Gets path materialization metadata, when present.</summary>
     public CypherPathTypes? PathTypes { get; }
 
+    /// <summary>
+    /// Gets row shaping that a provider must apply around the rendered statement because its
+    /// engine cannot express the clauses after a <c>UNION</c>.
+    /// </summary>
+    /// <remarks>
+    /// Provider-internal. The shared planner never sets this; a provider lowering pass sets it
+    /// only when it moved global ordering, paging, or aggregate combination out of Cypher.
+    /// </remarks>
+    internal CypherPostProcessing? PostProcessing { get; init; }
+
     private static ReadOnlyDictionary<string, object?> CopyParameters(IReadOnlyDictionary<string, object?> parameters)
     {
         var copy = new Dictionary<string, object?>(StringComparer.Ordinal);

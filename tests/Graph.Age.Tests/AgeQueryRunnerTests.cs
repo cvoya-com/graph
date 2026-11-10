@@ -4,6 +4,7 @@
 namespace Cvoya.Graph.Age.Tests;
 
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
+using Cvoya.Graph.Cypher.Ast;
 
 public sealed class AgeQueryRunnerTests
 {
@@ -18,6 +19,173 @@ public sealed class AgeQueryRunnerTests
         Assert.Contains("id::text::bigint = ANY(@nativeIds)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY id::text::bigint", sql, StringComparison.Ordinal);
         Assert.EndsWith("FOR UPDATE", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_AppliesPostUnionOrderingAndPaging()
+    {
+        const string cypher =
+            "MATCH (src:A) RETURN src AS Node, src.Name AS __age_union_sort0\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B) RETURN src AS Node, src.Name AS __age_union_sort0";
+
+        var postProcessing = new CypherPostProcessing(
+            [new CypherPostSort(1, Descending: false)],
+            Skip: 1_000,
+            Limit: 100,
+            ResultColumnCount: 1,
+            Aggregation: null);
+
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            cypher,
+            ["Node", "__age_union_sort0"],
+            postProcessing);
+
+        Assert.StartsWith("SELECT age_result.\"Node\" FROM ag_catalog.cypher('qa_r1'", sql, StringComparison.Ordinal);
+        Assert.Contains("AS age_result (\"Node\" agtype, \"__age_union_sort0\" agtype)", sql, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "ORDER BY age_result.\"__age_union_sort0\" ASC OFFSET 1000 LIMIT 100",
+            sql,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("SELECT age_result.\"Node\", age_result.\"__age_union_sort0\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_CombinesPartialAggregates()
+    {
+        const string cypher =
+            "MATCH (src:A) WITH src.Status AS k, count(src) AS c RETURN k AS Key, c AS C\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B) WITH src.Status AS k, count(src) AS c RETURN k AS Key, c AS C";
+
+        var postProcessing = new CypherPostProcessing(
+            Sort: [],
+            Skip: null,
+            Limit: null,
+            ResultColumnCount: 2,
+            Aggregation: new CypherPostAggregation(
+                [0],
+                [new CypherPostAggregate(1, "sum")]));
+
+        var sql = AgeQueryRunner.BuildCommandText("qa_r1", cypher, ["Key", "C"], postProcessing);
+
+        Assert.Contains(
+            "SELECT age_result.\"Key\", " +
+            "sum((age_result.\"C\")::text::numeric)::text::ag_catalog.agtype AS \"C\" " +
+            "FROM ag_catalog.cypher('qa_r1'",
+            sql,
+            StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_CombinesPartialAverageWithCount()
+    {
+        const string cypher =
+            "MATCH (src:A) WITH src.Status AS k, sum(src.Amount) AS s, " +
+            "count(src.Amount) AS c RETURN k AS Key, s AS Average, c AS c\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B) WITH src.Status AS k, sum(src.Amount) AS s, " +
+            "count(src.Amount) AS c RETURN k AS Key, s AS Average, c AS c";
+
+        var postProcessing = new CypherPostProcessing(
+            Sort: [],
+            Skip: null,
+            Limit: null,
+            ResultColumnCount: 2,
+            Aggregation: new CypherPostAggregation(
+                [0],
+                [new CypherPostAggregate(1, "avg", AuxiliaryColumnIndex: 2)]));
+
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            cypher,
+            ["Key", "Average", "c"],
+            postProcessing);
+
+        Assert.Contains(
+            "(sum((age_result.\"Average\")::text::numeric) / " +
+            "NULLIF(sum((age_result.\"c\")::text::numeric), 0))::text::ag_catalog.agtype AS \"Average\"",
+            sql,
+            StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_CombinesMinMaxWithAgtypeComparison()
+    {
+        const string cypher =
+            "MATCH (src:A) WITH src.Status AS k, min(src.Amount) AS n, max(src.Amount) AS x " +
+            "RETURN k AS Key, n AS Minimum, x AS Maximum\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B) WITH src.Status AS k, min(src.Amount) AS n, max(src.Amount) AS x " +
+            "RETURN k AS Key, n AS Minimum, x AS Maximum";
+
+        var postProcessing = new CypherPostProcessing(
+            Sort: [],
+            Skip: null,
+            Limit: null,
+            ResultColumnCount: 3,
+            Aggregation: new CypherPostAggregation(
+                [0],
+                [
+                    new CypherPostAggregate(1, "min"),
+                    new CypherPostAggregate(2, "max"),
+                ]));
+
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            cypher,
+            ["Key", "Minimum", "Maximum"],
+            postProcessing);
+
+        Assert.Contains(
+            "ag_catalog.age_min(age_result.\"Minimum\") AS \"Minimum\"",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ag_catalog.age_max(age_result.\"Maximum\") AS \"Maximum\"",
+            sql,
+            StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_DeduplicatesDistinctProjection()
+    {
+        var postProcessing = new CypherPostProcessing(
+            Sort: [],
+            Skip: 10,
+            Limit: 5,
+            ResultColumnCount: 1,
+            Aggregation: null,
+            Distinct: true);
+
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            "MATCH (src:A) RETURN src.Status AS Status UNION ALL MATCH (src:B) RETURN src.Status AS Status",
+            ["Status"],
+            postProcessing);
+
+        Assert.StartsWith("SELECT DISTINCT age_result.\"Status\"", sql, StringComparison.Ordinal);
+        Assert.EndsWith("OFFSET 10 LIMIT 5", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCommandText_LeavesPlainStatementsUnchanged()
+    {
+        var sql = AgeQueryRunner.BuildCommandText(
+            "qa_r1",
+            "MATCH (src:A) RETURN src AS Node",
+            ["Node"],
+            postProcessing: null);
+
+        Assert.Equal(
+            "SELECT age_result.\"Node\" FROM ag_catalog.cypher('qa_r1', " +
+            "$cvoya_age_0$MATCH (src:A) RETURN src AS Node$cvoya_age_0$, @agtypeParams) " +
+            "AS age_result (\"Node\" agtype)",
+            sql);
     }
 
     [Fact]

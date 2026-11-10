@@ -96,5 +96,26 @@ public enum CypherBinaryOperator
     /// <summary>
     /// Regular expression comparison.
     /// </summary>
-    Matches
+    Matches,
+
+    /// <summary>
+    /// Map containment comparison (<c>@&gt;</c>): the left map contains every key/value pair of
+    /// the right map.
+    /// </summary>
+    /// <remarks>
+    /// Only dialects that expose a native containment operator can render this comparison. The
+    /// Apache AGE dialect uses it to keep a hierarchy label filter on the GIN-indexed
+    /// <c>properties</c> column instead of scanning an array property.
+    /// </remarks>
+    PropertyContainment,
+
+    /// <summary>
+    /// Property-key existence test (<c>?</c>): the left map contains the named key.
+    /// </summary>
+    /// <remarks>
+    /// Only dialects that expose a native key-existence operator can render this comparison. The
+    /// Apache AGE dialect uses the negated form for missing-property filters so the predicate no
+    /// longer has to evaluate <c>agtype_access_operator</c> for every row.
+    /// </remarks>
+    PropertyKeyExists
 }

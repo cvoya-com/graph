@@ -106,16 +106,15 @@ internal sealed class AgeNodeManager(AgeGraphContext context)
                 pair.Key != SimpleCollectionStorageCodec.GetNullIndexesPropertyName(nameof(Graph.INode.Labels)) &&
                 pair.Key != SimpleCollectionStorageCodec.GetElementTypePropertyName(nameof(Graph.INode.Labels)))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-        var storageLabel = SerializationBridge.GetRootStorageName(entity.Label, relationship: false);
-        if (SerializationBridge.IsEncodedRootStorageName(storageLabel, relationship: false))
+        // Every hierarchy vertex carries its full logical label chain so the containment fallback
+        // can answer a hierarchy query without a labels() predicate, which PostgreSQL cannot turn
+        // into a GIN index scan. See ADR-0008: the upstream
+        // `'X' IN labels(v) OR 'X' IN inheritance_labels` shape is deliberately not used. A single
+        // native label needs no hierarchy property because its physical table already identifies it.
+        var inheritanceLabels = ResolveInheritanceLabels(entity);
+        if (inheritanceLabels.Count > 0)
         {
-            properties[AgeElementMatcher.InheritanceLabelsProperty] = entity.ActualLabels.Count > 0
-                ? entity.ActualLabels
-                : [entity.Label];
-        }
-        else if (entity.ActualType == typeof(Graph.DynamicNode) && entity.ActualLabels.Count > 1)
-        {
-            properties[AgeElementMatcher.InheritanceLabelsProperty] = entity.ActualLabels;
+            properties[AgeElementMatcher.InheritanceLabelsProperty] = inheritanceLabels;
         }
 
         if (entity.ActualType.IsConstructedGenericType)
@@ -125,6 +124,30 @@ internal sealed class AgeNodeManager(AgeGraphContext context)
         }
 
         return properties;
+    }
+
+    private static List<string> ResolveInheritanceLabels(EntityInfo entity)
+    {
+        // Dynamic nodes and explicitly labelled instances own their logical label list. Typed
+        // nodes derive it from the explicitly attributed CLR base-type chain, root label first.
+        if (entity.ActualLabels.Count > 0)
+        {
+            return [.. entity.ActualLabels];
+        }
+
+        var labels = new List<string>();
+        for (var type = entity.ActualType;
+             type is not null && type != typeof(Graph.Node) && typeof(Graph.INode).IsAssignableFrom(type);
+             type = type.BaseType)
+        {
+            var label = Labels.GetLabelFromType(type);
+            if (!labels.Contains(label, StringComparer.OrdinalIgnoreCase))
+            {
+                labels.Insert(0, label);
+            }
+        }
+
+        return labels.Count > 0 ? labels : [entity.Label];
     }
 
     internal void ValidateNodeProperties<TNode>(TNode node) where TNode : class, Graph.INode

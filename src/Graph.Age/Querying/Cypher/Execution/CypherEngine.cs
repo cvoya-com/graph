@@ -415,7 +415,7 @@ internal sealed class CypherEngine
         AgeGraphTransaction transaction,
         CancellationToken cancellationToken)
     {
-        statement = CypherQueryVisitor.LowerStatement(statement);
+        statement = CypherQueryVisitor.LowerStatement(statement, _schemaRegistry.HasComplexProperties);
         var rendered = new CypherRenderer(AgeDialect.Instance).Render(statement);
         var projectionColumns = rendered.ProjectionColumns
             .Select(AgeEntityProjectionPass.NormalizeProjectionColumn)
@@ -466,6 +466,7 @@ internal sealed class CypherEngine
                 cypherQuery.Text,
                 cypherQuery.Parameters,
                 cypherQuery.ProjectionColumns ?? [],
+                cypherQuery.PostProcessing,
                 transaction,
                 cancellationToken).ConfigureAwait(false);
 
@@ -474,6 +475,10 @@ internal sealed class CypherEngine
 
             // Let the materializer handle everything - no need to duplicate logic here
             var adapted = _recordAdapter.Adapt(records);
+            if (cypherQuery.SumUnionCountBranches)
+            {
+                adapted = CollapseUnionCountBranches(adapted);
+            }
 
             var result = await _materializer.MaterializeAsync<T>(
                 adapted,
@@ -526,6 +531,7 @@ internal sealed class CypherEngine
             cypherQuery.Text,
             cypherQuery.Parameters,
             cypherQuery.ProjectionColumns ?? [],
+            cypherQuery.PostProcessing,
             transaction,
             cancellationToken);
 
@@ -638,6 +644,59 @@ internal sealed class CypherEngine
             : ElementTerminal.None;
     }
 
+    /// <summary>
+    /// Sums the per-physical-label <c>count(...)</c> rows produced by the AGE UNION ALL count
+    /// expansion into the one scalar a LINQ count terminal expects. Apache AGE cannot aggregate
+    /// over a union at the Cypher level and does not support <c>CALL { }</c> on every supported
+    /// version, so the provider performs this last addition over the disjoint branch counts.
+    /// </summary>
+    private static List<GraphRecord> CollapseUnionCountBranches(List<GraphRecord> records)
+    {
+        if (records.Count <= 1 || records[0].Values.Count != 1)
+        {
+            return records;
+        }
+
+        var column = records[0].Keys.Single();
+        long total = 0;
+        foreach (var record in records)
+        {
+            if (record.Values.Count != 1 ||
+                record[column] is not { Kind: GraphValueKind.Scalar } value)
+            {
+                return records;
+            }
+
+            var increment = value.ScalarValue switch
+            {
+                long longValue => longValue,
+                int intValue => intValue,
+                short shortValue => shortValue,
+                sbyte sbyteValue => sbyteValue,
+                byte byteValue => byteValue,
+                ushort ushortValue => ushortValue,
+                uint uintValue => uintValue,
+                ulong ulongValue when ulongValue <= long.MaxValue => (long)ulongValue,
+                _ => (long?)null,
+            };
+
+            if (increment is null)
+            {
+                return records;
+            }
+
+            total = checked(total + increment.Value);
+        }
+
+        return
+        [
+            new GraphRecord(new Dictionary<string, GraphValue>(StringComparer.Ordinal)
+            {
+                [column] = GraphValue.Scalar(total),
+            }),
+        ];
+    }
+
     private static void ValidateNonEmptyAggregateValue<T>(Expression expression, List<AgeRecord> records)
     {
         if (!typeof(T).IsValueType || Nullable.GetUnderlyingType(typeof(T)) is not null)
@@ -709,7 +768,7 @@ internal sealed class CypherEngine
         // Extract the element type from the expression if the type is a collection
         var elementType = ExtractElementType(type, expression);
 
-        var visitor = new CypherQueryVisitor(elementType, loggerFactory);
+        var visitor = new CypherQueryVisitor(elementType, loggerFactory, _schemaRegistry.HasComplexProperties);
         visitor.Visit(expression);
 
         var query = visitor.Query;
@@ -722,7 +781,13 @@ internal sealed class CypherEngine
             convertedParams[key] = paramBuilder.BuildParameterValue(value);
         }
 
-        return new CypherQuery(query.Text, convertedParams, query.GraphPathTypes, query.ProjectionColumns);
+        return new CypherQuery(
+            query.Text,
+            convertedParams,
+            query.GraphPathTypes,
+            query.ProjectionColumns,
+            query.PostProcessing,
+            query.SumUnionCountBranches);
     }
 
     private async Task<IReadOnlyList<IEntity>> LoadMixedSearchEntitiesAsync(

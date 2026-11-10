@@ -160,4 +160,10 @@ internal static partial class LogMessages
     [LoggerMessage(EventId = 0, Level = LogLevel.Debug, Message = "Initialized AGE schema metadata")]
     internal static partial void LogDebugAgeSchemaManager49(this ILogger logger);
 
+    [LoggerMessage(EventId = 0, Level = LogLevel.Warning, Message = "Physical node label '{PhysicalLabel}' stores rows that declare the registered hierarchy label '{RegisteredAncestor}', but the physical label is not registered. Base-label queries omit those rows; call AgeGraphStore.RegisterLabelHierarchy('{RegisteredAncestor}', '{PhysicalLabel}') before querying.")]
+    internal static partial void LogWarningUnregisteredLabelHierarchy(this ILogger logger, global::System.String physicalLabel, global::System.String registeredAncestor);
+
+    [LoggerMessage(EventId = 0, Level = LogLevel.Warning, Message = "Runtime label-hierarchy validation could not inspect every physical label; registration gaps may be unreported")]
+    internal static partial void LogWarningLabelHierarchyValidationFailed(this ILogger logger, Exception exception);
+
 }

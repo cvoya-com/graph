@@ -110,9 +110,11 @@ public sealed class AgeHarness(AgeGraphCleanupFixture graphCleanup) : IGraphProv
         await using var result = await native.Runner.RunAsync(
             """
             CREATE (source:ContractExternalNode)
-            SET source.Marker = $marker, source.Role = 'source'
+            SET source.Marker = $marker, source.Role = 'source',
+                source.inheritance_labels = ['ContractExternalNode']
             CREATE (target:ContractExternalNode)
-            SET target.Marker = $marker, target.Role = 'target'
+            SET target.Marker = $marker, target.Role = 'target',
+                target.inheritance_labels = ['ContractExternalNode']
             CREATE (source)-[relationship:CONTRACT_EXTERNAL_RELATIONSHIP]->(target)
             SET relationship.Marker = $marker
             RETURN true AS created
@@ -175,10 +177,10 @@ public sealed class AgeHarness(AgeGraphCleanupFixture graphCleanup) : IGraphProv
         var ageTransaction = transaction as AgeGraphTransaction
             ?? throw new ArgumentException("The graph was not created by the AGE harness.", nameof(graph));
         var result = await ageTransaction.Runner.RunAsync(
-            $"""
+            $$"""
             MATCH (n)
-            WHERE ($label IN labels(n) OR $label IN coalesce(n.inheritance_labels, []))
-              AND n.{escapedProperty} IN $values
+            WHERE ($label IN labels(n) OR properties(n) @> { inheritance_labels: [$label] })
+              AND n.{{escapedProperty}} IN $values
             RETURN count(n) AS node_count
             """,
             new { label, values = values.ToArray() },
