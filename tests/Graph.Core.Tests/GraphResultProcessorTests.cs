@@ -18,6 +18,10 @@ public class GraphResultProcessorTests
     static GraphResultProcessorTests()
     {
         EntitySerializerRegistry.Instance.Register<ValueCollectionNode>(new ValueCollectionNodeSerializer());
+        EntitySerializerRegistry.Instance.Register<MaterializationLabeledBase>(
+            new MaterializationLabeledBaseSerializer());
+        EntitySerializerRegistry.Instance.Register<MaterializationLabeledDerived>(
+            new MaterializationLabeledDerivedSerializer());
     }
 
     [Fact]
@@ -501,6 +505,56 @@ public class GraphResultProcessorTests
         Assert.Throws<ArgumentException>(() => GraphValue.Path([node, node]));
     }
 
+    [Fact]
+    public async Task NodeWireFixture_LabelDiscoveryResolvesDerivedTypeOnRepeatedMaterialization()
+    {
+        var record = NodeRecord(GraphValue.Node(
+            "labeled-wire-1",
+            [nameof(MaterializationLabeledDerived)],
+            new Dictionary<string, GraphValue>
+            {
+                [nameof(MaterializationLabeledDerived.Name)] = GraphValue.Scalar("derived"),
+                [nameof(MaterializationLabeledDerived.Extra)] = GraphValue.Scalar(7),
+            }));
+        var processor = new GraphResultProcessor(factory);
+
+        // Two passes: the first populates the label index, the second must reuse it and still
+        // resolve the concrete CLR type from the stored label.
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var info = Assert.Single(await processor.ProcessAsync(
+                [record], typeof(MaterializationLabeledBase), TestContext.Current.CancellationToken));
+
+            Assert.Equal(typeof(MaterializationLabeledDerived), info.ActualType);
+            Assert.Equal(
+                "derived",
+                Assert.IsType<SimpleValue>(info.SimpleProperties[nameof(MaterializationLabeledDerived.Name)].Value).Object);
+        }
+    }
+
+    [Fact]
+    public async Task NodeWireFixture_LabelDiscoveryBuildsTypeIndexOnceForManyNodes()
+    {
+        GraphResultProcessor.ResetLabelIndexBuildsForTesting();
+        var records = Enumerable.Range(0, 100)
+            .Select(index => NodeRecord(GraphValue.Node(
+                $"bulk-wire-{index}",
+                [nameof(ValueCollectionNode)],
+                new Dictionary<string, GraphValue>())))
+            .ToList();
+        var processor = new GraphResultProcessor(factory);
+
+        var infos = await processor.ProcessAsync(
+            records, typeof(ValueCollectionNode), TestContext.Current.CancellationToken);
+
+        Assert.Equal(100, infos.Count);
+        Assert.All(infos, info => Assert.Equal(typeof(ValueCollectionNode), info.ActualType));
+
+        // A per-node scan would build the index 100 times. Allow a few rebuilds for assemblies that
+        // other tests load concurrently (AssemblyLoad invalidates the cache), but keep a wide margin.
+        Assert.InRange(GraphResultProcessor.LabelIndexBuildCountForTesting(typeof(ValueCollectionNode)), 1, 20);
+    }
+
     private static void AssertSimpleCollection<T>(EntityInfo entity, string propertyName, IEnumerable<T> expected)
     {
         var collection = Assert.IsType<SimpleCollection>(entity.SimpleProperties[propertyName].Value);
@@ -624,6 +678,18 @@ public class GraphResultProcessorTests
 
     private sealed record MetadataDerivedRelationship : MetadataBaseRelationship;
 
+    [Node(nameof(MaterializationLabeledBase))]
+    private record MaterializationLabeledBase : Node
+    {
+        public string Name { get; init; } = "";
+    }
+
+    [Node(nameof(MaterializationLabeledDerived))]
+    private sealed record MaterializationLabeledDerived : MaterializationLabeledBase
+    {
+        public int Extra { get; init; }
+    }
+
     private sealed record ValueCollectionNode : Node
     {
         public List<int> IntegerList { get; init; } = [];
@@ -699,4 +765,43 @@ public class GraphResultProcessorTests
                 new Dictionary<string, PropertySchema>());
         }
     }
+
+    private sealed class MaterializationLabeledBaseSerializer : IEntitySerializer
+    {
+        public Type EntityType => typeof(MaterializationLabeledBase);
+
+        public EntityInfo Serialize(object obj) => throw new NotSupportedException();
+
+        public object Deserialize(EntityInfo entity) => throw new NotSupportedException();
+
+        public EntitySchema GetSchema() => BuildSchema(
+            typeof(MaterializationLabeledBase),
+            nameof(MaterializationLabeledBase.Name));
+    }
+
+    private sealed class MaterializationLabeledDerivedSerializer : IEntitySerializer
+    {
+        public Type EntityType => typeof(MaterializationLabeledDerived);
+
+        public EntityInfo Serialize(object obj) => throw new NotSupportedException();
+
+        public object Deserialize(EntityInfo entity) => throw new NotSupportedException();
+
+        public EntitySchema GetSchema() => BuildSchema(
+            typeof(MaterializationLabeledDerived),
+            nameof(MaterializationLabeledDerived.Name),
+            nameof(MaterializationLabeledDerived.Extra));
+    }
+
+    private static EntitySchema BuildSchema(Type type, params string[] propertyNames) =>
+        new(
+            type,
+            type.Name,
+            IsNullable: false,
+            IsSimple: false,
+            propertyNames.ToDictionary(
+                name => name,
+                name => new PropertySchema(type.GetProperty(name)!, name, PropertyType.Simple),
+                StringComparer.Ordinal),
+            new Dictionary<string, PropertySchema>());
 }

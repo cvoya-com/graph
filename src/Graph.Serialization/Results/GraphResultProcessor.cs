@@ -4,6 +4,7 @@
 namespace Cvoya.Graph.Serialization.Results;
 
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Reflection;
 using Cvoya.Graph.Serialization;
 using Microsoft.Extensions.Logging;
@@ -17,6 +18,33 @@ public sealed class GraphResultProcessor
 {
     private readonly EntityFactory _entityFactory;
     private readonly ILogger<GraphResultProcessor> _logger;
+
+    // Label-to-CLR-type discovery used to run a full AppDomain type scan for every materialized
+    // node. Cache the scan and the per-target-type label maps instead; an AssemblyLoad invalidates
+    // both because a newly loaded assembly can contribute the concrete type a label refers to.
+    private static readonly ConcurrentDictionary<Type, LabelIndex> NodeLabelIndexes = new();
+    private static readonly ConcurrentDictionary<Type, LabelIndex> RelationshipLabelIndexes = new();
+    private static readonly ConcurrentDictionary<Type, string> TypeLabels = new();
+    private static readonly ConcurrentDictionary<Type, PropertyInfo?> LabelsProperties = new();
+    private static readonly ConcurrentDictionary<Type, int> LabelIndexBuildsForTests = new();
+    private static long _assemblyVersion;
+    private static Type[]? _knownConcreteTypes;
+    private static long _knownConcreteTypesVersion = -1;
+
+    static GraphResultProcessor()
+    {
+        AppDomain.CurrentDomain.AssemblyLoad += static (_, _) =>
+            Interlocked.Increment(ref _assemblyVersion);
+    }
+
+    private sealed record LabelIndex(long Version, Dictionary<string, Type> ByLabel);
+
+    private static readonly List<ComplexProperty> NoComplexProperties = [];
+
+    internal static int LabelIndexBuildCountForTesting(Type targetType) =>
+        LabelIndexBuildsForTests.TryGetValue(targetType, out var count) ? count : 0;
+
+    internal static void ResetLabelIndexBuildsForTesting() => LabelIndexBuildsForTests.Clear();
 
     private sealed record ComplexProperty(
         GraphValue ParentNode,
@@ -105,6 +133,11 @@ public sealed class GraphResultProcessor
 
         var node = nodeObj.As<GraphValue>();
         var list = complexPropsObj as List<object> ?? [];
+        if (list.Count == 0)
+        {
+            return new NodeResult(node, NoComplexProperties);
+        }
+
         var complexProperties = list
             .OfType<Dictionary<string, object>>()
             .Select(dict => new ComplexProperty(
@@ -123,7 +156,7 @@ public sealed class GraphResultProcessor
 
     private List<EntityInfo> ProcessPathSegments(IReadOnlyList<GraphRecord> records, Type pathSegmentType)
     {
-        var results = new List<EntityInfo>();
+        var results = new List<EntityInfo>(records.Count);
         var genericArgs = pathSegmentType.GetGenericArguments();
         var sourceType = genericArgs[0];  // Person
         var relType = genericArgs[1];     // WorksFor
@@ -164,7 +197,7 @@ public sealed class GraphResultProcessor
 
     private List<EntityInfo> ProcessRelationships(IReadOnlyList<GraphRecord> records, Type targetType)
     {
-        var results = new List<EntityInfo>();
+        var results = new List<EntityInfo>(records.Count);
 
         foreach (var record in records)
         {
@@ -217,9 +250,13 @@ public sealed class GraphResultProcessor
                 $"Complex properties cannot exceed {GraphDataModel.DefaultDepthAllowed} levels of depth.");
         }
 
-        visitedNodeIds ??= new HashSet<string>(StringComparer.Ordinal);
-        if (!visitedNodeIds.Add(node.ElementId!))
-            throw new GraphException("A cycle or shared node was detected in the persisted complex-property graph.");
+        var hasComplexProperties = allComplexProperties.Count > 0;
+        if (hasComplexProperties || visitedNodeIds is not null)
+        {
+            visitedNodeIds ??= new HashSet<string>(StringComparer.Ordinal);
+            if (!visitedNodeIds.Add(node.ElementId!))
+                throw new GraphException("A cycle or shared node was detected in the persisted complex-property graph.");
+        }
 
         // Create the base entity info for this node
         var actualType = DiscoverActualNodeType(node, nodeType);
@@ -229,12 +266,12 @@ public sealed class GraphResultProcessor
         // Use dynamic extraction for dynamic nodes (including complex property nodes)
         if (typeof(Graph.DynamicNode).IsAssignableFrom(actualType))
         {
-            simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(node.Properties);
+            simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(node.Entries);
             RemoveComplexCollectionStorageProperties(simpleProperties);
         }
         else
         {
-            simpleProperties = ExtractSimpleProperties(node.Properties, actualType);
+            simpleProperties = ExtractSimpleProperties(node.Entries, actualType);
         }
 
         AddNodeLabelsProperty(simpleProperties, actualType, node.Labels);
@@ -242,15 +279,10 @@ public sealed class GraphResultProcessor
         var entityInfo = new EntityInfo(
             ActualType: actualType,
             Label: label,
-            ActualLabels: node.Labels.ToList(),
+            ActualLabels: node.Labels,
             SimpleProperties: simpleProperties,
             ComplexProperties: new Dictionary<string, Property>()
         );
-
-        // Find all complex properties where this node is the parent
-        var directComplexProps = allComplexProperties
-            .Where(cp => cp.ParentNode.ElementId == node.ElementId)
-            .ToList();
 
         // Resolve the schema from the DISCOVERED concrete type, not the declared/target type.
         // For a base-typed complex property holding a derived instance (e.g. a PoliceDogDescription
@@ -265,6 +297,21 @@ public sealed class GraphResultProcessor
             _logger.LogWarningGraphResultProcessor280(actualType.Name);
             return entityInfo;
         }
+
+        // An all-null complex collection has no child rows but still stores its length and null
+        // indexes in the node's storage entries, so a missing schema complex property is the only
+        // safe reason to skip the rehydration walk.
+        if (!hasComplexProperties && schema.ComplexProperties.Count == 0)
+        {
+            // No complex-property rows and no schema property can match; skip the per-node LINQ
+            // search for the common flat-node case.
+            return entityInfo;
+        }
+
+        // Find all complex properties where this node is the parent
+        var directComplexProps = allComplexProperties
+            .Where(cp => cp.ParentNode.ElementId == node.ElementId)
+            .ToList();
 
         foreach (var (propertyName, propertySchema) in schema.ComplexProperties)
         {
@@ -349,7 +396,7 @@ public sealed class GraphResultProcessor
         // Create the base entity info for this node
         Dictionary<string, Property> simpleProperties;
 
-        simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(node.Properties);
+        simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(node.Entries);
         RemoveComplexCollectionStorageProperties(simpleProperties);
         if (depth > 0)
         {
@@ -359,7 +406,7 @@ public sealed class GraphResultProcessor
         var entityInfo = new EntityInfo(
             ActualType: nodeType,
             Label: node.Labels.Count == 0 ? "" : node.Labels[0],
-            ActualLabels: node.Labels.ToList(),
+            ActualLabels: node.Labels,
             SimpleProperties: simpleProperties,
             ComplexProperties: new Dictionary<string, Property>()
         );
@@ -509,7 +556,7 @@ public sealed class GraphResultProcessor
 
     private List<EntityInfo> ProcessProjections(IReadOnlyList<GraphRecord> records, Type targetType)
     {
-        var results = new List<EntityInfo>();
+        var results = new List<EntityInfo>(records.Count);
 
         foreach (var record in records)
         {
@@ -871,7 +918,7 @@ public sealed class GraphResultProcessor
 
     private List<EntityInfo> ProcessNodes(IReadOnlyList<GraphRecord> records, Type targetType)
     {
-        var results = new List<EntityInfo>();
+        var results = new List<EntityInfo>(records.Count);
 
         foreach (var record in records)
         {
@@ -896,14 +943,17 @@ public sealed class GraphResultProcessor
     }
 
     private static Dictionary<string, Property> ExtractAllSimplePropertiesForDynamicEntity(
-        IReadOnlyDictionary<string, object> properties)
+        IReadOnlyDictionary<string, GraphValue> entries)
     {
-        var result = new Dictionary<string, Property>();
-        foreach (var (key, value) in properties)
+        var result = new Dictionary<string, Property>(entries.Count);
+        foreach (var (key, wireValue) in entries)
         {
             if (key == GraphValueConverter.MetadataPropertyName)
                 continue;
 
+            // Convert one wire value at a time instead of materializing the whole property bag
+            // first; flat nodes are the hot path and must not pay for a redundant dictionary.
+            var value = wireValue.ToObject();
             Serialized serializedValue;
             // Dictionaries (wire maps) are not simple collections; they pass through as scalar values.
             if (value is IEnumerable enumerable and not string and not byte[] and not IDictionary)
@@ -983,12 +1033,12 @@ public sealed class GraphResultProcessor
         // Handle dynamic nodes differently
         if (typeof(Graph.DynamicNode).IsAssignableFrom(actualType))
         {
-            simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(node.Properties);
+            simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(node.Entries);
             RemoveComplexCollectionStorageProperties(simpleProperties);
         }
         else
         {
-            simpleProperties = ExtractSimpleProperties(node.Properties, actualType);
+            simpleProperties = ExtractSimpleProperties(node.Entries, actualType);
         }
 
         AddNodeLabelsProperty(simpleProperties, actualType, node.Labels);
@@ -996,7 +1046,7 @@ public sealed class GraphResultProcessor
         return new EntityInfo(
             ActualType: actualType,
             Label: label,
-            ActualLabels: node.Labels.ToList(),
+            ActualLabels: node.Labels,
             SimpleProperties: simpleProperties,
             ComplexProperties: new Dictionary<string, Property>()
         );
@@ -1007,7 +1057,11 @@ public sealed class GraphResultProcessor
         Type actualType,
         IReadOnlyList<string> labels)
     {
-        var labelsProperty = actualType.GetProperty(nameof(Graph.INode.Labels));
+        var labelsProperty = actualType.Assembly.IsCollectible
+            ? actualType.GetProperty(nameof(Graph.INode.Labels))
+            : LabelsProperties.GetOrAdd(
+                actualType,
+                static type => type.GetProperty(nameof(Graph.INode.Labels)));
         if (labelsProperty is null)
         {
             return;
@@ -1037,11 +1091,11 @@ public sealed class GraphResultProcessor
         // Handle dynamic relationships differently
         if (typeof(Graph.DynamicRelationship).IsAssignableFrom(actualType))
         {
-            simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(relationship.Properties);
+            simpleProperties = ExtractAllSimplePropertiesForDynamicEntity(relationship.Entries);
         }
         else
         {
-            simpleProperties = ExtractSimpleProperties(relationship.Properties, actualType);
+            simpleProperties = ExtractSimpleProperties(relationship.Entries, actualType);
         }
 
         // Add Type property for all relationships (both dynamic and typed)
@@ -1079,7 +1133,7 @@ public sealed class GraphResultProcessor
         }
 
         // Step 1: Try to get type from stored metadata
-        var metadataType = GraphValueConverter.GetTypeFromMetadata(node.Properties);
+        var metadataType = GraphValueConverter.GetTypeFromMetadata(node.Entries);
         if (metadataType != null && IsCompatibleType(metadataType, targetType))
         {
             _logger.LogDebugGraphResultProcessor1116(metadataType.Name, targetType.Name);
@@ -1115,7 +1169,7 @@ public sealed class GraphResultProcessor
         }
 
         // Step 1: Try to get type from stored metadata
-        var metadataType = GraphValueConverter.GetTypeFromMetadata(relationship.Properties);
+        var metadataType = GraphValueConverter.GetTypeFromMetadata(relationship.Entries);
         if (metadataType != null && IsCompatibleType(metadataType, targetType))
         {
             _logger.LogDebugGraphResultProcessor1156(metadataType.Name, targetType.Name);
@@ -1150,25 +1204,17 @@ public sealed class GraphResultProcessor
     /// </summary>
     private static Type? DiscoverTypeFromNodeLabels(IReadOnlyList<string> labels, Type targetType)
     {
-        if (!labels.Any())
+        if (labels.Count == 0)
             return null;
 
-        // Get all types that are assignable to the target type. This must NOT be scoped to
-        // INode types: targetType here can be a plain complex-property POCO (e.g. the element
-        // type of a List<T> complex property) that never implements INode, yet its concrete
-        // subtype is exactly what the stored label encodes and what we need to recover.
-        var candidateTypes = GetKnownConcreteTypes()
-            .Where(t => targetType.IsAssignableFrom(t))
-            .ToList();
-
-        // Try to find a type that matches one of the labels
+        // The index is built per target type (not per node). It must NOT be scoped to INode types:
+        // targetType here can be a plain complex-property POCO (e.g. the element type of a List<T>
+        // complex property) that never implements INode, yet its concrete subtype is exactly what
+        // the stored label encodes and what we need to recover.
+        var labelIndex = GetLabelIndex(targetType, relationships: false);
         foreach (var label in labels)
         {
-            var matchingType = candidateTypes.FirstOrDefault(t =>
-                string.Equals(t.Name, label, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(GetTypeLabel(t), label, StringComparison.OrdinalIgnoreCase));
-
-            if (matchingType != null)
+            if (!string.IsNullOrEmpty(label) && labelIndex.TryGetValue(label, out var matchingType))
                 return matchingType;
         }
 
@@ -1183,23 +1229,67 @@ public sealed class GraphResultProcessor
         if (string.IsNullOrEmpty(relationshipType))
             return null;
 
-        // Get all types that are assignable to the target type
-        var candidateTypes = GetKnownRelationshipTypes()
-            .Where(t => targetType.IsAssignableFrom(t))
-            .ToList();
+        return GetLabelIndex(targetType, relationships: true).TryGetValue(relationshipType, out var matchingType)
+            ? matchingType
+            : null;
+    }
 
-        // Try to find a type that matches the relationship type
-        var matchingType = candidateTypes.FirstOrDefault(t =>
-            string.Equals(GetTypeLabel(t), relationshipType, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(t.Name, relationshipType, StringComparison.OrdinalIgnoreCase));
+    /// <summary>
+    /// Gets the label-to-type map for one target type, rebuilding it after an assembly load.
+    /// </summary>
+    private static Dictionary<string, Type> GetLabelIndex(Type targetType, bool relationships)
+    {
+        var cache = relationships ? RelationshipLabelIndexes : NodeLabelIndexes;
+        var version = Volatile.Read(ref _assemblyVersion);
+        if (cache.TryGetValue(targetType, out var cached) && cached.Version == version)
+            return cached.ByLabel;
 
-        return matchingType;
+        LabelIndexBuildsForTests.AddOrUpdate(targetType, 1, static (_, count) => count + 1);
+        var byLabel = BuildLabelIndex(targetType, relationships);
+
+        // Never retain types from a collectible AssemblyLoadContext: the cache would keep that
+        // context alive and break runtime unload expectations. Such assemblies are rare, so pay the
+        // scan per call instead of caching.
+        if (AreAllAssembliesCacheable(AppDomain.CurrentDomain.GetAssemblies()))
+        {
+            cache[targetType] = new LabelIndex(version, byLabel);
+        }
+        else
+        {
+            cache.TryRemove(targetType, out _);
+        }
+
+        return byLabel;
+    }
+
+    private static Dictionary<string, Type> BuildLabelIndex(Type targetType, bool relationships)
+    {
+        var byLabel = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
+        foreach (var type in GetKnownConcreteTypes())
+        {
+            if (relationships && !typeof(Graph.IRelationship).IsAssignableFrom(type))
+                continue;
+            if (!targetType.IsAssignableFrom(type))
+                continue;
+
+            // Match both the CLR type name and an explicit [Node]/[Relationship] label, keeping the
+            // previous "first type in scan order wins" resolution for duplicate labels.
+            byLabel.TryAdd(GetTypeLabel(type), type);
+            byLabel.TryAdd(type.Name, type);
+        }
+
+        return byLabel;
     }
 
     /// <summary>
     /// Gets the label for a type, checking for attributes first.
     /// </summary>
-    private static string GetTypeLabel(Type type)
+    private static string GetTypeLabel(Type type) =>
+        type.Assembly.IsCollectible
+            ? ComputeTypeLabel(type)
+            : TypeLabels.GetOrAdd(type, static t => ComputeTypeLabel(t));
+
+    private static string ComputeTypeLabel(Type type)
     {
         // Check for NodeAttribute or RelationshipAttribute
         var nodeAttr = type.GetCustomAttribute<NodeAttribute>();
@@ -1220,61 +1310,81 @@ public sealed class GraphResultProcessor
     /// <see cref="DiscoverTypeFromNodeLabels"/>). The caller narrows this down via an
     /// assignability check against the specific target type it is resolving.
     /// </summary>
-    private static IEnumerable<Type> GetKnownConcreteTypes()
+    private static Type[] GetKnownConcreteTypes()
     {
-        return AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(assembly =>
-            {
-                try
-                {
-                    return assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException ex)
-                {
-                    // Handle cases where some types can't be loaded
-                    return ex.Types.Where(t => t != null).Cast<Type>();
-                }
-                catch
-                {
-                    return Enumerable.Empty<Type>();
-                }
-            })
-            .Where(t => t.IsClass && !t.IsAbstract)
-            .Where(t => t != typeof(Graph.DynamicNode) && t != typeof(Graph.DynamicRelationship)); // Exclude dynamic entities from schema discovery
+        // Read the version before taking the assembly snapshot: a load that races with the scan
+        // changes the version and forces a rebuild on the next call instead of pinning a partial scan.
+        var version = Volatile.Read(ref _assemblyVersion);
+        var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+        if (Volatile.Read(ref _knownConcreteTypesVersion) == version &&
+            Volatile.Read(ref _knownConcreteTypes) is { } cached)
+        {
+            return cached;
+        }
+
+        var types = ScanConcreteTypes(assemblies);
+        if (AreAllAssembliesCacheable(assemblies))
+        {
+            Volatile.Write(ref _knownConcreteTypesVersion, version);
+            Volatile.Write(ref _knownConcreteTypes, types);
+        }
+
+        return types;
     }
 
-    /// <summary>
-    /// Gets all known relationship types from loaded assemblies.
-    /// </summary>
-    private static IEnumerable<Type> GetKnownRelationshipTypes()
+    private static Type[] ScanConcreteTypes(Assembly[] assemblies)
     {
-        // Get types from the current app domain that implement IRelationship
-        return AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(assembly =>
+        var types = new List<Type>();
+        foreach (var assembly in assemblies)
+        {
+            try
             {
-                try
+                foreach (var type in assembly.GetTypes())
                 {
-                    return assembly.GetTypes();
+                    if (type.IsClass && !type.IsAbstract &&
+                        type != typeof(Graph.DynamicNode) && type != typeof(Graph.DynamicRelationship))
+                    {
+                        types.Add(type);
+                    }
                 }
-                catch (ReflectionTypeLoadException ex)
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                // Handle cases where some types can't be loaded
+                foreach (var type in ex.Types)
                 {
-                    // Handle cases where some types can't be loaded
-                    return ex.Types.Where(t => t != null).Cast<Type>();
+                    if (type is { IsClass: true, IsAbstract: false } &&
+                        type != typeof(Graph.DynamicNode) && type != typeof(Graph.DynamicRelationship))
+                    {
+                        types.Add(type);
+                    }
                 }
-                catch
-                {
-                    return Enumerable.Empty<Type>();
-                }
-            })
-            .Where(t => t.IsClass && !t.IsAbstract && typeof(Graph.IRelationship).IsAssignableFrom(t))
-            .Where(t => t != typeof(Graph.DynamicRelationship)); // Exclude DynamicRelationship from schema discovery
+            }
+            catch
+            {
+                // A dynamic assembly can refuse type enumeration; skip it.
+            }
+        }
+
+        return [.. types];
+    }
+
+    private static bool AreAllAssembliesCacheable(Assembly[] assemblies)
+    {
+        foreach (var assembly in assemblies)
+        {
+            if (assembly.IsCollectible)
+                return false;
+        }
+
+        return true;
     }
 
     private Dictionary<string, Property> ExtractSimpleProperties(
-        IReadOnlyDictionary<string, object> properties,
+        IReadOnlyDictionary<string, GraphValue> entries,
         Type entityType)
     {
-        var result = new Dictionary<string, Property>();
+        var result = new Dictionary<string, Property>(entries.Count);
 
         if (!_entityFactory.CanDeserialize(entityType))
             return result;
@@ -1283,7 +1393,7 @@ public sealed class GraphResultProcessor
         if (schema?.SimpleProperties == null)
             return result;
 
-        foreach (var (key, value) in properties)
+        foreach (var (key, wireValue) in entries)
         {
             // Skip metadata properties
             if (key == GraphValueConverter.MetadataPropertyName)
@@ -1292,6 +1402,7 @@ public sealed class GraphResultProcessor
             // Check if this property is in the schema
             if (schema.SimpleProperties.TryGetValue(key, out var propertySchema))
             {
+                object? value = wireValue.ToObject();
                 object convertedValue;
                 try
                 {
@@ -1349,7 +1460,7 @@ public sealed class GraphResultProcessor
 
     private List<EntityInfo> ProcessMixedEntities(IReadOnlyList<GraphRecord> records)
     {
-        var results = new List<EntityInfo>();
+        var results = new List<EntityInfo>(records.Count);
 
         foreach (var record in records)
         {
