@@ -179,4 +179,15 @@ fi
 
 assert_no_command "test"
 
+: > "$CALLS_FILE"
+sentinel_output=$(AGE18_CONNECTION_STRING='Host=db.internal;Port=5433;Username=u;Password=REVIEW_PASSWORD_SENTINEL;Database=graph' \
+    run_runner --lane age --age-versions 1.8.0 --no-build)
+
+assert_contains "test --project tests/Graph.Age.Tests/Graph.Age.Tests.csproj"
+
+if grep -q "REVIEW_PASSWORD_SENTINEL" <<<"$sentinel_output"; then
+    echo "Runner output leaked the connection-string password." >&2
+    exit 1
+fi
+
 echo "run-tests.sh tests passed"

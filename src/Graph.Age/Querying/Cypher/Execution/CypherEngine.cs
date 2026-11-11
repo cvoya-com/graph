@@ -484,16 +484,6 @@ internal sealed class CypherEngine
                 adapted = CollapseUnionCountBranches(adapted);
             }
 
-            // AGE's native shortest-path functions return one whole path value per row, unlike the
-            // decomposed per-hop rows produced by the shared TraversePaths plan.
-            if (cypherQuery.IsNativeGraphPath && cypherQuery.GraphPathTypes is { } nativePathTypes)
-            {
-                return _materializer.MaterializeNativeGraphPaths<T>(
-                    adapted,
-                    nativePathTypes,
-                    cancellationToken);
-            }
-
             var result = await _materializer.MaterializeAsync<T>(
                 adapted,
                 cypherQuery.GraphPathTypes,
@@ -551,23 +541,6 @@ internal sealed class CypherEngine
 
         if (cypherQuery.GraphPathTypes is { } graphPathTypes && typeof(T) == typeof(IGraphPath))
         {
-            if (cypherQuery.IsNativeGraphPath)
-            {
-                await foreach (var record in records.WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    var path = _materializer.MaterializeNativeGraphPaths<IGraphPath>(
-                        [_recordAdapter.Adapt(record)],
-                        graphPathTypes,
-                        cancellationToken);
-                    if (path is not null)
-                    {
-                        yield return (T)path;
-                    }
-                }
-
-                yield break;
-            }
-
             await foreach (var path in StreamGraphPathsAsync(records, graphPathTypes, cancellationToken)
                 .WithCancellation(cancellationToken)
                 .ConfigureAwait(false))
@@ -799,7 +772,12 @@ internal sealed class CypherEngine
         // Extract the element type from the expression if the type is a collection
         var elementType = ExtractElementType(type, expression);
 
-        var visitor = new CypherQueryVisitor(elementType, Dialect, _graphName, loggerFactory, _schemaRegistry.HasComplexProperties);
+        var visitor = new CypherQueryVisitor(
+            elementType,
+            Dialect,
+            _graphName,
+            loggerFactory,
+            _schemaRegistry.HasComplexProperties);
         visitor.Visit(expression);
 
         var query = visitor.Query;
@@ -818,8 +796,7 @@ internal sealed class CypherEngine
             query.GraphPathTypes,
             query.ProjectionColumns,
             query.PostProcessing,
-            query.SumUnionCountBranches,
-            query.IsNativeGraphPath);
+            query.SumUnionCountBranches);
     }
 
     private async Task<IReadOnlyList<IEntity>> LoadMixedSearchEntitiesAsync(

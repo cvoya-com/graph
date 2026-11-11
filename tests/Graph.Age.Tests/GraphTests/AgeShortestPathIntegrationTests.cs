@@ -8,8 +8,9 @@ using Cvoya.Graph.CompatibilityTests;
 /// <summary>
 /// Provider integration coverage for Apache AGE 1.8 native shortest-path planning and path
 /// hydration. The inherited TCK contract runs the public shortest-path surface; these tests pin the
-/// AGE-specific shape: one row per native path value, direction mapping, endpoint predicates,
-/// cycles, ties, cartesian source/target pairs, and segment hydration.
+/// AGE-specific shape: native function selection, direction mapping, endpoint predicates, cycles,
+/// ties, cartesian source/target pairs, segment and complex-property hydration, and paging on
+/// projected results.
 /// </summary>
 public sealed class AgeShortestPathIntegrationTests(AgeHarness harness)
     : AgeTest(harness, StoreIsolation.FreshStore)
@@ -204,6 +205,72 @@ public sealed class AgeShortestPathIntegrationTests(AgeHarness harness)
 
         var endpoint = Assert.Single(endpoints);
         Assert.Equal(end.TestKey, AsPerson(endpoint).TestKey);
+    }
+
+    [Fact]
+    [RequiresCapability(GraphCapability.ShortestPath)]
+    public async Task ShortestPath_AppliesPagingToProjectedResults()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (start, _, _, end) = await SeedDiamondAsync(ct);
+
+        var takenScalar = await Graph.Nodes<Person>()
+            .Where(person => person.TestKey == start.TestKey)
+            .AllShortestPaths<Knows, Person>(person => person.TestKey == end.TestKey)
+            .Select(path => path.Segments.Count)
+            .Take(1)
+            .ToListAsync(ct);
+        var skippedScalar = await Graph.Nodes<Person>()
+            .Where(person => person.TestKey == start.TestKey)
+            .AllShortestPaths<Knows, Person>(person => person.TestKey == end.TestKey)
+            .Select(path => path.Segments.Count)
+            .Skip(2)
+            .ToListAsync(ct);
+        var takenEntity = await Graph.Nodes<Person>()
+            .Where(person => person.TestKey == start.TestKey)
+            .AllShortestPaths<Knows, Person>(person => person.TestKey == end.TestKey)
+            .Select(path => path.End)
+            .Take(1)
+            .ToListAsync(ct);
+
+        Assert.Equal([2], takenScalar);
+        Assert.Empty(skippedScalar);
+        var endpoint = Assert.Single(takenEntity);
+        Assert.Equal(end.TestKey, AsPerson(endpoint).TestKey);
+    }
+
+    [Fact]
+    [RequiresCapability(GraphCapability.ShortestPath)]
+    public async Task ShortestPath_HydratesComplexPropertiesOnPathNodes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var start = new PersonWithComplexProperty
+        {
+            FirstName = "start",
+            Address = new AddressValue { Street = "1 Main St", City = "Springfield" },
+        };
+        var end = new PersonWithComplexProperty
+        {
+            FirstName = "end",
+            Address = new AddressValue { Street = "2 Oak Ave", City = "Shelbyville" },
+        };
+        await Graph.CreateNodeAsync(start, null, ct);
+        await Graph.CreateNodeAsync(end, null, ct);
+        await Graph.ConnectAsync(start, new Knows(), end, cancellationToken: ct);
+
+        var paths = await Graph.Nodes<PersonWithComplexProperty>()
+            .Where(person => person.TestKey == start.TestKey)
+            .ShortestPath<Knows, PersonWithComplexProperty>(person => person.TestKey == end.TestKey)
+            .ToListAsync(ct);
+
+        var path = Assert.Single(paths);
+        var segment = Assert.Single(path.Segments);
+        var startNode = Assert.IsType<PersonWithComplexProperty>(segment.StartNode);
+        var endNode = Assert.IsType<PersonWithComplexProperty>(segment.EndNode);
+        Assert.Equal("1 Main St", startNode.Address.Street);
+        Assert.Equal("Springfield", startNode.Address.City);
+        Assert.Equal("2 Oak Ave", endNode.Address.Street);
+        Assert.Equal("Shelbyville", endNode.Address.City);
     }
 
     [Fact]

@@ -26,18 +26,13 @@ using Cvoya.Graph.Cypher.Ast;
 /// <c>Count()</c>/<c>LongCount()</c> expects. The branches are disjoint because an AGE vertex is
 /// stored in exactly one label table.
 /// </param>
-/// <param name="IsNativeGraphPath">
-/// When <see langword="true"/>, the query returns one whole native path value per row rather than
-/// the decomposed per-hop rows described by <paramref name="GraphPathTypes"/>.
-/// </param>
 internal sealed record CypherQuery(
     string Text,
     IReadOnlyDictionary<string, object?> Parameters,
     (Type Source, Type Relationship, Type Target)? GraphPathTypes = null,
     IReadOnlyList<string>? ProjectionColumns = null,
     CypherPostProcessing? PostProcessing = null,
-    bool SumUnionCountBranches = false,
-    bool IsNativeGraphPath = false)
+    bool SumUnionCountBranches = false)
 {
     /// <summary>
     /// Creates an empty query.

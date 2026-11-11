@@ -32,11 +32,30 @@ public sealed class AgeGraphStore : IAsyncDisposable
     private volatile AgeServerCapabilities? serverCapabilities;
 
     /// <summary>Initializes a store from a PostgreSQL connection string.</summary>
+    /// <remarks>
+    /// Retained with the original four-parameter signature for binary compatibility; prefer the
+    /// overload that also accepts <see cref="AgeGraphStoreOptions"/>. Defaults for the optional
+    /// parameters live on that overload.
+    /// </remarks>
+    /// <param name="connectionString">The connection string, or <see langword="null"/> to use <c>AGE_CONNECTION_STRING</c>.</param>
+    /// <param name="graphName">The AGE graph name, or <see langword="null"/> to use <c>AGE_GRAPH</c> or <c>cvoya_graph</c>.</param>
+    /// <param name="schemaRegistry">The schema registry, or <see langword="null"/> for a new one.</param>
+    /// <param name="loggerFactory">The logger factory, or <see langword="null"/> for a null logger.</param>
+    public AgeGraphStore(
+        string? connectionString,
+        string? graphName,
+        SchemaRegistry? schemaRegistry,
+        ILoggerFactory? loggerFactory)
+        : this(connectionString, graphName, schemaRegistry, loggerFactory, options: null)
+    {
+    }
+
+    /// <summary>Initializes a store from a PostgreSQL connection string with provider options.</summary>
     /// <param name="connectionString">The connection string, or <see langword="null"/> to use <c>AGE_CONNECTION_STRING</c>.</param>
     /// <param name="graphName">The AGE graph name, or <see langword="null"/> to use <c>AGE_GRAPH</c> or <c>cvoya_graph</c>.</param>
     /// <param name="schemaRegistry">An optional schema registry.</param>
     /// <param name="loggerFactory">An optional logger factory.</param>
-    /// <param name="options">Optional provider behavior options; <see langword="null"/> uses the defaults.</param>
+    /// <param name="options">Provider behavior options; <see langword="null"/> uses the defaults.</param>
     public AgeGraphStore(
         string? connectionString = null,
         string? graphName = null,
@@ -62,11 +81,30 @@ public sealed class AgeGraphStore : IAsyncDisposable
     }
 
     /// <summary>Initializes a store from an externally owned AGE-enabled data source.</summary>
+    /// <remarks>
+    /// Retained with the original four-parameter signature for binary compatibility; prefer the
+    /// overload that also accepts <see cref="AgeGraphStoreOptions"/>. Defaults for the optional
+    /// parameters live on that overload.
+    /// </remarks>
+    /// <param name="dataSource">A data source configured with <c>UseAge()</c>.</param>
+    /// <param name="graphName">The AGE graph name.</param>
+    /// <param name="schemaRegistry">The schema registry, or <see langword="null"/> for a new one.</param>
+    /// <param name="loggerFactory">The logger factory, or <see langword="null"/> for a null logger.</param>
+    public AgeGraphStore(
+        NpgsqlDataSource dataSource,
+        string graphName,
+        SchemaRegistry? schemaRegistry,
+        ILoggerFactory? loggerFactory)
+        : this(dataSource, graphName, schemaRegistry, loggerFactory, options: null)
+    {
+    }
+
+    /// <summary>Initializes a store from an externally owned AGE-enabled data source with provider options.</summary>
     /// <param name="dataSource">A data source configured with <c>UseAge()</c>.</param>
     /// <param name="graphName">The AGE graph name.</param>
     /// <param name="schemaRegistry">An optional schema registry.</param>
     /// <param name="loggerFactory">An optional logger factory.</param>
-    /// <param name="options">Optional provider behavior options; <see langword="null"/> uses the defaults.</param>
+    /// <param name="options">Provider behavior options; <see langword="null"/> uses the defaults.</param>
     public AgeGraphStore(
         NpgsqlDataSource dataSource,
         string graphName,

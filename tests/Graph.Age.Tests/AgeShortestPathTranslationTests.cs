@@ -59,7 +59,7 @@ public sealed class AgeShortestPathTranslationTests
         var visitor = new CypherQueryVisitor(query.ElementType, Age18, "translation");
         visitor.Visit(query.Expression);
 
-        Assert.True(visitor.Query.IsNativeGraphPath);
+        Assert.NotNull(visitor.Query.GraphPathTypes);
         Assert.Contains("ag_catalog.age_shortest_path(", visitor.Query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("shortestPath(", visitor.Query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("allShortestPaths(", visitor.Query.Text, StringComparison.Ordinal);
@@ -83,7 +83,7 @@ public sealed class AgeShortestPathTranslationTests
         var visitor = new CypherQueryVisitor(query.ElementType, Age18, "translation");
         visitor.Visit(query.Expression);
 
-        Assert.True(visitor.Query.IsNativeGraphPath);
+        Assert.NotNull(visitor.Query.GraphPathTypes);
         Assert.Contains("ag_catalog.age_all_shortest_paths(", visitor.Query.Text, StringComparison.Ordinal);
         Assert.Contains("'in'", visitor.Query.Text, StringComparison.Ordinal);
     }

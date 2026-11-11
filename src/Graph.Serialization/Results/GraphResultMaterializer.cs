@@ -95,9 +95,11 @@ public sealed class GraphResultMaterializer
     }
 
     /// <summary>
-    /// Materializes whole native path values, one per record, into graph paths. This is the AGE
-    /// native shortest-path shape; decomposed <c>TraversePaths</c> rows continue to use
-    /// <see cref="MaterializeAsync{T}"/>.
+    /// Materializes whole native path values, one per record, into graph paths. The AGE query
+    /// pipeline decomposes native shortest-path values in SQL and hydrates them through
+    /// <see cref="MaterializeAsync{T}"/>; this entry point remains for callers that hold whole
+    /// path values (for example from a direct native-function call) whose element types declare
+    /// no complex properties.
     /// </summary>
     public T? MaterializeNativeGraphPaths<T>(
         IReadOnlyList<GraphRecord> records,

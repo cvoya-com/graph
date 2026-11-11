@@ -11,6 +11,7 @@ using Cvoya.Graph.Cypher.Ast.Expressions;
 using Cvoya.Graph.Cypher.Planning;
 using Cvoya.Graph.Querying;
 using AstBinaryExpression = Cvoya.Graph.Cypher.Ast.Expressions.BinaryExpression;
+using AstIndexExpression = Cvoya.Graph.Cypher.Ast.Expressions.IndexExpression;
 
 /// <summary>
 /// Plans Apache AGE 1.8 native shortest-path functions. AGE 1.8 rejects the Cypher
@@ -185,8 +186,10 @@ internal sealed class AgeNativeShortestPathPlanner
         var returnsPath = model.Projection is null && model.Terminal == TerminalOperation.ToListOrArray;
         if (returnsPath)
         {
+            // Paging windows the whole-path rows before they are decomposed into per-hop rows,
+            // exactly like the shared TraversePaths plan.
             AddPaging(clauses, model.Paging);
-            clauses.Add(new ReturnClause([new ReturnItem(new VariableRef(PathAlias), null)], distinct: false));
+            AddDecomposedPathProjection(clauses, model);
         }
         else if (model.Terminal is TerminalOperation.Count or TerminalOperation.Any)
         {
@@ -208,6 +211,8 @@ internal sealed class AgeNativeShortestPathPlanner
         }
         else
         {
+            // Paging applies to the whole-path rows before the projection, matching the shared plan.
+            AddPaging(clauses, model.Paging);
             AddPathProjection(clauses, model, lowerer);
         }
 
@@ -218,6 +223,87 @@ internal sealed class AgeNativeShortestPathPlanner
                 model.PathShape.TargetType)
             : null;
         return new CypherStatement(clauses, parameters.Parameters, pathTypes);
+    }
+
+    // Decomposes each whole native path value into one row per hop (pathIndex/hopIndex plus a
+    // PathSegment map), the same shape the shared TraversePaths plan produces, so hydration —
+    // including complex-property subgraphs via EntityProjectionExpression — runs through the
+    // standard result pipeline instead of a native-path-only materializer.
+    private static void AddDecomposedPathProjection(
+        List<ICypherClause> clauses,
+        GraphQueryModel model)
+    {
+        var pathShape = model.PathShape!;
+        clauses.Add(new WithClause(
+            [new ReturnItem(new FunctionCall("collect", [new VariableRef(PathAlias)]), "__paths")],
+            distinct: false));
+        clauses.Add(new UnwindClause(
+            new FunctionCall("range",
+            [
+                new Literal(0),
+                new AstBinaryExpression(
+                    CypherBinaryOperator.Subtract,
+                    new FunctionCall("size", [new VariableRef("__paths")]),
+                    new Literal(1)),
+            ]),
+            "pathIndex"));
+        clauses.Add(new WithClause(
+        [
+            new ReturnItem(new AstIndexExpression(new VariableRef("__paths"), new VariableRef("pathIndex")), PathAlias),
+            new ReturnItem(new VariableRef("pathIndex"), null)
+        ], distinct: false));
+        clauses.Add(new UnwindClause(
+            new FunctionCall("range",
+            [
+                new Literal(0),
+                new AstBinaryExpression(
+                    CypherBinaryOperator.Subtract,
+                    new FunctionCall("length", [new VariableRef(PathAlias)]),
+                    new Literal(1)),
+            ]),
+            "hopIndex"));
+        clauses.Add(new WithClause(
+        [
+            new ReturnItem(new VariableRef("pathIndex"), null),
+            new ReturnItem(new VariableRef("hopIndex"), null),
+            new ReturnItem(
+                new AstIndexExpression(new FunctionCall("nodes", [new VariableRef(PathAlias)]), new VariableRef("hopIndex")),
+                "src"),
+            new ReturnItem(
+                new AstIndexExpression(new FunctionCall("relationships", [new VariableRef(PathAlias)]), new VariableRef("hopIndex")),
+                "r"),
+            new ReturnItem(
+                new AstIndexExpression(
+                    new FunctionCall("nodes", [new VariableRef(PathAlias)]),
+                    new AstBinaryExpression(CypherBinaryOperator.Add, new VariableRef("hopIndex"), new Literal(1))),
+                "tgt")
+        ], distinct: false));
+        // A shortest path can have more than one hop, so every hop column can also hold an
+        // unconstrained intermediate node whose runtime type is unknowable at planning time —
+        // load complex properties rather than silently under-hydrating it, exactly like the
+        // shared plan does for multi-hop traversals.
+        var intermediateNodesPossible =
+            model.Traversal.LastOrDefault(step => !step.IsComplexPropertyTraversal) is not { Depth.Max: <= 1 };
+        var loadSourceProperties = intermediateNodesPossible || CypherQueryPlanner.HasComplexProperties(pathShape.SourceType);
+        var loadTargetProperties = intermediateNodesPossible || CypherQueryPlanner.HasComplexProperties(pathShape.TargetType);
+        clauses.Add(new ReturnClause(
+        [
+            new ReturnItem(new VariableRef("pathIndex"), null),
+            new ReturnItem(new VariableRef("hopIndex"), null),
+            new ReturnItem(
+                new MapExpression(
+                [
+                    new MapEntry("StartNode", new EntityProjectionExpression("src", loadSourceProperties)),
+                    new MapEntry("Relationship", new VariableRef("r")),
+                    new MapEntry("EndNode", new EntityProjectionExpression("tgt", loadTargetProperties)),
+                ]),
+                "PathSegment"),
+        ], distinct: false));
+        clauses.Add(new OrderByClause(
+        [
+            new OrderByItem(new VariableRef("pathIndex"), descending: false),
+            new OrderByItem(new VariableRef("hopIndex"), descending: false)
+        ]));
     }
 
     private static void AddPathProjection(
@@ -236,21 +322,28 @@ internal sealed class AgeNativeShortestPathPlanner
             } member && parameter.Type == typeof(IGraphPath))
         {
             var entity = lowerer.LowerLambda(selector, PathAlias);
+            // Start/End are declared INode, but the pattern label-constrains them to the path
+            // shape's endpoint types — use those rather than the interface, which always reports
+            // complex properties.
+            var entityType = member.Member.Name == nameof(IGraphPath.Start)
+                ? model.PathShape!.SourceType
+                : model.PathShape!.TargetType;
+            var loadProperties = CypherQueryPlanner.HasComplexProperties(entityType);
             clauses.Add(new WithClause(
-            [
-                new ReturnItem(new VariableRef(PathAlias), null),
-                new ReturnItem(entity, "__pathEntity"),
-            ], distinct: false));
+                loadProperties
+                    ? [new ReturnItem(new VariableRef(PathAlias), null), new ReturnItem(entity, "__pathEntity")]
+                    : [new ReturnItem(entity, "__pathEntity")],
+                distinct: false));
             clauses.Add(new EntityProjectionClause(
                 EntityProjectionShape.Node,
                 "__pathEntity",
                 relationshipAlias: null,
                 targetAlias: null,
-                loadSourceProperties: true,
+                loadSourceProperties: loadProperties,
                 loadTargetProperties: false,
                 includePathCoordinates: false,
                 ordering: [],
-                rowIdentityAliases: [PathAlias]));
+                rowIdentityAliases: loadProperties ? [PathAlias] : []));
             return;
         }
 

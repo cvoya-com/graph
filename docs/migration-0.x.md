@@ -326,7 +326,7 @@ The portable contract is explicit:
 | Relationship predicates | Yes | Yes | Yes |
 | `Union` / `Concat` | Yes | Yes | Yes |
 | Nullable simple collection elements | Yes | Yes | Yes |
-| Shortest path | Yes | **No in v1.0** | Yes on AGE 1.8+; skipped on 1.7 |
+| Shortest path | Yes | Yes on AGE 1.8+; skipped on 1.7 | Yes |
 | Whole-entity ordering | Yes | No | No |
 
 AGE declares `ShortestPath` only on Apache AGE 1.8.0 or later, where the native

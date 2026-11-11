@@ -2716,7 +2716,7 @@ public sealed class CypherQueryPlanner
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, bool> ComplexPropertyCache = new();
 
-    private static bool HasComplexProperties(Type? type)
+    internal static bool HasComplexProperties(Type? type)
     {
         // Interfaces are conservatively assumed complex: they carry no label of their own, so the
         // per-label, kind-aware resolution below cannot bound them.

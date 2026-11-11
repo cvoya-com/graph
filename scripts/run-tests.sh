@@ -203,12 +203,15 @@ if [ "$START_AGE" = true ] && [ "$RUN_AGE" = false ]; then
     exit 64
 fi
 
-for age_version in "${AGE_VERSIONS[@]}"; do
-    if ! [[ "$age_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-        print_error "Invalid AGE version '$age_version' in --age-versions (expected e.g. 1.7.0 or 1.8.0)."
-        exit 64
-    fi
-done
+# Guard the loop: expanding an empty array under `set -u` aborts on Bash 3.2 (macOS /bin/bash).
+if [ "${#AGE_VERSIONS[@]}" -gt 0 ]; then
+    for age_version in "${AGE_VERSIONS[@]}"; do
+        if ! [[ "$age_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            print_error "Invalid AGE version '$age_version' in --age-versions (expected e.g. 1.7.0 or 1.8.0)."
+            exit 64
+        fi
+    done
+fi
 
 # Maps an AGE version to the host port its container publishes (see scripts/containers/start-age.sh).
 age_port_for_version() {
@@ -216,6 +219,34 @@ age_port_for_version() {
         1.8*) echo "${AGE18_PORT:-5456}" ;;
         *) echo "${AGE_PORT:-5455}" ;;
     esac
+}
+
+# Describes the connection used for one AGE version without exposing credentials:
+# only the derived host/port/database, or which custom override supplied the string.
+age_describe_connection() {
+    local version="$1"
+
+    case "$version" in
+        1.7*)
+            if [ -n "${AGE17_CONNECTION_STRING:-}" ]; then
+                echo "custom AGE17_CONNECTION_STRING"
+                return
+            fi
+            ;;
+        1.8*)
+            if [ -n "${AGE18_CONNECTION_STRING:-}" ]; then
+                echo "custom AGE18_CONNECTION_STRING"
+                return
+            fi
+            ;;
+    esac
+
+    if [ "${#AGE_VERSIONS[@]}" -eq 1 ] && [ -n "${AGE_CONNECTION_STRING:-}" ]; then
+        echo "custom AGE_CONNECTION_STRING"
+        return
+    fi
+
+    echo "localhost:$(age_port_for_version "$version") database ${AGE_DATABASE:-postgres}"
 }
 
 # Builds the connection string for one AGE version. Per-version overrides win;
@@ -509,7 +540,7 @@ run_age_project_for_versions() {
         export AGE_CONNECTION_STRING
         AGE_CONNECTION_STRING=$(age_connection_string_for "$version")
         version_slug=$(printf '%s' "$version" | tr '.' '-')
-        print_status "AGE_CONNECTION_STRING for AGE $version: $AGE_CONNECTION_STRING"
+        print_status "AGE $version connection: $(age_describe_connection "$version") (credentials are never logged)"
         if ! run_test_project "$project" "age-$version_slug"; then
             failed=true
             if [ "$KEEP_GOING" = false ]; then

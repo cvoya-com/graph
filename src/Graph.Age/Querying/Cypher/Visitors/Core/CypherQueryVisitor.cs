@@ -92,7 +92,6 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         _logger?.LogDebugCypherQueryVisitor36(_rootType);
         CypherStatement statement;
         var sumUnionCountBranches = false;
-        var nativeGraphPath = false;
         try
         {
             WholeEntityOrderingValidator.Validate(node, _dialect);
@@ -100,7 +99,6 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
             if (_dialect.SupportsNativeShortestPath && AgeNativeShortestPathPlanner.IsShortestPath(model))
             {
                 statement = new AgeNativeShortestPathPlanner(_dialect, _graphName).Plan(model);
-                nativeGraphPath = statement.PathTypes is not null;
             }
             else
             {
@@ -129,8 +127,7 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
             pathTypes,
             projectionColumns,
             statement.PostProcessing,
-            sumUnionCountBranches,
-            nativeGraphPath);
+            sumUnionCountBranches);
         if (_logger?.IsEnabled(LogLevel.Debug) == true)
         {
             _logger.LogDebugCypherQueryVisitor53(Query.Parameters.Keys.ToArray(), Query.Parameters.Count);
