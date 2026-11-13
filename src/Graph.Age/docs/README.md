@@ -97,7 +97,7 @@ the cache.
 | [Declared aggregates](03-declared-aggregates.md) | `Count`/`Sum`/`Min`/`Max`/`Average` grouped by one property | Yes: aggregate table, functions, triggers |
 | [Complex property hydration](04-complex-property-hydration.md) | Auto-loading nested value objects and their collections | Yes: value nodes and relationships on write |
 | [Native ID lists and AGE versions](05-native-id-lists-and-age-versions.md) | Full-text `Search` and endpoint filters that resolve many native ids | No: version-specific query lowering |
-| [Collectible plugin types](06-collectible-plugin-types.md) | Plugin-provided derived node types in a collectible load context | No: read-time type discovery |
+| [Collectible types in depth planning](06-collectible-plugin-types.md) | Measuring plugin-provided derived types without retaining them in depth caches | No: read-time type discovery |
 | [Index presence cache](07-index-presence-cache.md) | Per-store positive-only presence cache: tuning, disabling, and the cross-process `42P01` window | No: per-process cache of catalog probes |
 
 Start with equality indexes. Add ordering only for the exact sort property that paging uses. Add
@@ -123,9 +123,10 @@ for the one-time manual cleanup of objects created by an older preview build.
 
 ## Example project
 
-The snippets in these documents are self-contained console examples. Run them inside the
-repository's `examples/Playground` host if you want a ready project, or paste the classes into your
-own console application. The AGE benchmark harness
+The snippets show model declarations and application statements together. Put each model type in
+its own file and the application statements in your console host's entry point; supply connection
+settings and cancellation tokens from that host. The repository's `examples/Playground` provides a
+ready host. The AGE benchmark harness
 `tests/Graph.Age.Performance.Tests/AgeIndexBenchmarkHarness.cs` is the executable end-to-end reference
 for the declared-index scenarios.
 
