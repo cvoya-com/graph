@@ -133,6 +133,17 @@ public sealed class AgeDeclaredIndexNamingIntegrationTests(AgeGraphCleanupFixtur
             () => store.EnsureIndexesAsync(cancellationToken));
         Assert.Contains("already has a label named", exception.Message, StringComparison.Ordinal);
         Assert.Contains(Label + "__idx", exception.Message, StringComparison.Ordinal);
+
+        // The catalog is created before label provisioning. Failure must roll that DDL back,
+        // preserve the colliding user relationship and leave ordinary CRUD usable.
+        Assert.Equal(0, await TableCountAsync(
+            dataSource, graphName, AgeIndexMaintenance.CatalogTableName, cancellationToken));
+        Assert.Equal(2, await store.Graph.Nodes<NamingWidget>().CountAsync(cancellationToken));
+        Assert.Equal(1, await store.Graph.Relationships<NamingWidgetCollidingRelationship>().CountAsync(cancellationToken));
+        await store.Graph.CreateNodeAsync(
+            new NamingWidget { Name = "c", Region = "EU", Amount = 300 },
+            cancellationToken: cancellationToken);
+        Assert.Equal(3, await store.Graph.Nodes<NamingWidget>().CountAsync(cancellationToken));
     }
 
     [Fact]

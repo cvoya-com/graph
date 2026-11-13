@@ -96,6 +96,64 @@ public sealed class AgeNumericAggregateIntegrationTests(AgeGraphCleanupFixture g
         Assert.Equal("<null>:2:450:400:500;aktiv:1:500:500:500;inaktiv:1:200:200:200;neu:1:700:700:700;", Format(afterCreate));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DeclaredDerivedStateSharesTheCallerTransaction(bool commit)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var dataSource = CreateDataSource();
+        var graphName = graphCleanup.CreateGraphName("cvoya_agg_transaction");
+        await using var store = new AgeGraphStore(dataSource, graphName, CreateRegistry());
+        await store.CreateGraphIfNotExistsAsync(ct);
+        graphCleanup.MarkGraphCreated(graphName);
+        var first = new Nul72AggWidget { Name = "a", Status = "old", Kaufpreis = 100 };
+        var second = new Nul72AggWidget { Name = "b", Status = "old", Kaufpreis = 200 };
+        await store.Graph.CreateNodeAsync(first, cancellationToken: ct);
+        await store.Graph.CreateNodeAsync(second, cancellationToken: ct);
+        await CreateAsync(store, "c", null, 300);
+        _ = await store.EnsureIndexesAsync(ct);
+        var before = Format(await StatsAsync(store.Graph, ct));
+        Assert.Equal("<null>:1:300:300:300;old:2:150:100:200;", before);
+
+        await using (var transaction = await store.Graph.GetTransactionAsync(ct))
+        {
+            Assert.Equal(1, await store.Graph.Nodes<Nul72AggWidget>(transaction).Where(widget => widget.Name == first.Name).UpdateAsync(
+                setters => setters
+                    .SetProperty(widget => widget.Status, "new")
+                    .SetProperty(widget => widget.Kaufpreis, 400L), ct));
+            Assert.Equal(1, await store.Graph.Nodes<Nul72AggWidget>(transaction).Where(widget => widget.Name == second.Name).DeleteAsync(cancellationToken: ct));
+            await store.Graph.CreateNodeAsync(
+                new Nul72AggWidget { Name = "d", Status = "new", Kaufpreis = 600 }, transaction, ct);
+
+            Assert.Equal(
+                "<null>:1:300:300:300;new:2:500:400:600;",
+                Format(await StatsAsync(store.Graph, ct, transaction)));
+            // A second connection must see the committed base rows and derived rows together.
+            Assert.Equal(before, Format(await StatsAsync(store.Graph, ct)));
+            if (commit)
+            {
+                await transaction.CommitAsync();
+            }
+            else
+            {
+                await transaction.RollbackAsync();
+            }
+        }
+
+        var expected = commit ? "<null>:1:300:300:300;new:2:500:400:600;" : before;
+        Assert.Equal(expected, Format(await StatsAsync(store.Graph, ct)));
+        var names = await store.Graph.Nodes<Nul72AggWidget>()
+            .OrderBy(widget => widget.Name).Select(widget => widget.Name).ToListAsync(ct);
+        string[] expectedNames = commit ? ["a", "c", "d"] : ["a", "b", "c"];
+        Assert.Equal(expectedNames, names);
+        Assert.Equal(commit ? 1300L : 600L, await ScalarAsync(
+            dataSource, $"SELECT sum(sum_value) FROM {graphName}.\"{AggregateTable}\"", ct));
+
+        _ = await store.DropIndexesAsync(ct);
+        Assert.Equal(expected, Format(await StatsAsync(store.Graph, ct)));
+    }
+
     [Fact]
     public async Task TypeSafeAggregateDeclarationExecutesGroupedAggregate()
     {
@@ -161,21 +219,22 @@ public sealed class AgeNumericAggregateIntegrationTests(AgeGraphCleanupFixture g
 
     private static async Task<Dictionary<string, GroupStats>> StatsAsync(
         IGraph graph,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IGraphTransaction? transaction = null)
     {
-        var counts = await graph.Nodes<Nul72AggWidget>()
+        var counts = await graph.Nodes<Nul72AggWidget>(transaction)
             .GroupBy(widget => widget.Status)
             .Select(group => new { group.Key, Count = group.Count() })
             .ToListAsync(cancellationToken);
-        var averages = await graph.Nodes<Nul72AggWidget>()
+        var averages = await graph.Nodes<Nul72AggWidget>(transaction)
             .GroupBy(widget => widget.Status)
             .Select(group => new { group.Key, Value = group.Average(widget => widget.Kaufpreis) })
             .ToListAsync(cancellationToken);
-        var minimums = await graph.Nodes<Nul72AggWidget>()
+        var minimums = await graph.Nodes<Nul72AggWidget>(transaction)
             .GroupBy(widget => widget.Status)
             .Select(group => new { group.Key, Value = group.Min(widget => widget.Kaufpreis) })
             .ToListAsync(cancellationToken);
-        var maximums = await graph.Nodes<Nul72AggWidget>()
+        var maximums = await graph.Nodes<Nul72AggWidget>(transaction)
             .GroupBy(widget => widget.Status)
             .Select(group => new { group.Key, Value = group.Max(widget => widget.Kaufpreis) })
             .ToListAsync(cancellationToken);

@@ -289,6 +289,7 @@ jobs:
             --configuration Release \
             --lane age \
             --no-build \
+            --coverage \
             --disable-diff-engine \
             --report-trx \
             --results-directory "TestResults/age-${{ matrix.age }}"
