@@ -98,7 +98,8 @@ public sealed class ComplianceInventoryTests
     // domain data, external native rows, and read-only no-provision behavior.
     // +1 for NUL-75: deleting a node that only has an incoming user relationship must preflight
     // both directions (AGE 1.8 regression from the NUL-73 unidirectional fix).
-    private const int ExpectedTotalTestMethods = 502;
+    // +2: synchronous hierarchy/count composition and overlapping-edge delete preflight.
+    private const int ExpectedTotalTestMethods = 504;
 
     [Fact]
     public void TotalTestMethods_MatchesKnownSuiteSize()
