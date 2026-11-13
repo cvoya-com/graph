@@ -75,7 +75,11 @@ internal sealed class AgeTemporalParameterArithmeticPass : ICypherPass
                 projection.Ordering
                     .Select(item => new OrderByItem(Rewrite(item.Expression), item.Descending))
                     .ToArray(),
-                projection.RowIdentityAliases),
+                projection.RowIdentityAliases)
+            {
+                SourceComplexPropertyDepth = projection.SourceComplexPropertyDepth,
+                TargetComplexPropertyDepth = projection.TargetComplexPropertyDepth,
+            },
             _ => clause,
         };
 

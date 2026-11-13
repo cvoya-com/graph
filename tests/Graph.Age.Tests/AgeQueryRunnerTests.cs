@@ -22,6 +22,28 @@ public sealed class AgeQueryRunnerTests
     }
 
     [Fact]
+    public void InjectPageIds_UsesParameterizedUnwindForEveryRootMatch()
+    {
+        const string cypher =
+            "MATCH (src:A)\nRETURN src AS Node\n" +
+            "UNION ALL\n" +
+            "MATCH (src:B)\nRETURN src AS Node";
+
+        var injected = AgeQueryRunner.InjectPageIds(cypher, "src");
+
+        Assert.Equal(
+            2,
+            injected.Split('\n').Count(line =>
+                string.Equals(line, "UNWIND $__cvoya_page_ids AS __cvoya_page_id", StringComparison.Ordinal)));
+        Assert.Equal(
+            2,
+            injected.Split('\n').Count(line =>
+                string.Equals(line, "WHERE id(src) = __cvoya_page_id", StringComparison.Ordinal)));
+        Assert.DoesNotContain(" IN [", injected, StringComparison.Ordinal);
+        Assert.DoesNotContain(" OR id(src)", injected, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BuildCommandText_AppliesPostUnionOrderingAndPaging()
     {
         const string cypher =

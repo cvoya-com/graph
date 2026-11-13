@@ -157,7 +157,9 @@ public sealed class AgeSubgraphBatchTests(AgeGraphCleanupFixture graphCleanup)
                 batchCommandTransform: command => command.Name == failedCommand
                     ? command with
                     {
-                        Cypher = $"UNWIND [] AS ignored RETURN count(ignored) AS {command.ProjectionColumns.Single()}",
+                        Cypher = "UNWIND [] AS ignored RETURN " + string.Join(
+                            ", ",
+                            command.ProjectionColumns.Select(column => $"count(ignored) AS {column}")),
                     }
                     : command));
         var source = CreateNestedNode($"failed {failedCommand} source");

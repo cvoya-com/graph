@@ -292,16 +292,18 @@ internal sealed class AgeInlineComplexPropertyProjectionPass : ICypherPass
 
         private static void AppendHydrationClauses(
             List<ICypherClause> clauses,
-            IReadOnlyList<string> hydrationAliases,
+            IReadOnlyList<(string Alias, int Depth)> hydrationAliases,
             IReadOnlyList<string> baseCarry)
         {
             var carry = baseCarry.ToList();
-            foreach (var alias in hydrationAliases)
+            foreach (var (alias, depth) in hydrationAliases)
             {
                 var relationshipsAlias = $"{alias}_inline_relationships";
                 var propertyAlias = $"{alias}_inline_property";
                 var pathAlias = $"{alias}_inline_path";
                 var propertiesAlias = $"{alias}_inline_properties";
+                var maximumDepth = depth > 0 ? depth : GraphDataModel.DefaultDepthAllowed;
+                var singleHop = maximumDepth == 1;
 
                 clauses.Add(new MatchClause(
                 [
@@ -311,23 +313,33 @@ internal sealed class AgeInlineComplexPropertyProjectionPass : ICypherPass
                         new RelationshipPattern(
                             relationshipsAlias,
                             CypherDirection.Outgoing,
-                            new DepthRange(1, GraphDataModel.DefaultDepthAllowed),
+                            singleHop ? null : new DepthRange(1, maximumDepth),
                             types: []),
                         new NodePattern(propertyAlias, []),
                     ]),
                 ], optional: true));
-                clauses.Add(new WhereClause(new AllExpression(
-                    "propertyRelationship",
+                var marker = new PropertyAccess(
                     new VariableRef(relationshipsAlias),
-                    new BinaryExpression(
+                    AgeDialect.Instance.ComplexPropertyRelationshipMarker);
+                clauses.Add(new WhereClause(singleHop
+                    ? new BinaryExpression(
                         CypherBinaryOperator.Equal,
-                        new PropertyAccess(
-                            new VariableRef("propertyRelationship"),
-                            AgeDialect.Instance.ComplexPropertyRelationshipMarker),
-                        new Literal(true)))));
+                        marker,
+                        new Literal(true))
+                    : new AllExpression(
+                        "propertyRelationship",
+                        new VariableRef(relationshipsAlias),
+                        new BinaryExpression(
+                            CypherBinaryOperator.Equal,
+                            new PropertyAccess(
+                                new VariableRef("propertyRelationship"),
+                                AgeDialect.Instance.ComplexPropertyRelationshipMarker),
+                            new Literal(true)))));
                 clauses.Add(new WithClause(
                     carry.Select(Variable)
-                        .Append(new ReturnItem(PropertyPath(relationshipsAlias), pathAlias))
+                        .Append(new ReturnItem(
+                            PropertyPath(alias, relationshipsAlias, singleHop),
+                            pathAlias))
                         .ToArray(),
                     distinct: false));
                 clauses.Add(new WithClause(
@@ -341,14 +353,39 @@ internal sealed class AgeInlineComplexPropertyProjectionPass : ICypherPass
             }
         }
 
-        private static CaseExpression PropertyPath(string relationshipsAlias)
+        private static CaseExpression PropertyPath(
+            string ownerAlias,
+            string relationshipsAlias,
+            bool singleHop)
         {
+            var relationships = new VariableRef(relationshipsAlias);
+            if (singleHop)
+            {
+                // A depth-1 type uses a direct relationship instead of a variable-length
+                // pattern; AGE plans the direct join against the bound owner rather than a VLE.
+                return new CaseExpression(
+                    new UnaryExpression(CypherUnaryOperator.IsNull, relationships),
+                    new ListExpression([]),
+                    new ListExpression(
+                    [
+                        new MapExpression(
+                        [
+                            new MapEntry("ParentNode", new VariableRef(ownerAlias)),
+                            new MapEntry("Relationship", relationships),
+                            new MapEntry(
+                                "SequenceNumber",
+                                new PropertyAccess(relationships, "SequenceNumber")),
+                            new MapEntry("Property", Function("endNode", relationships)),
+                        ]),
+                    ]));
+            }
+
             var index = new VariableRef("i");
-            var relationship = new IndexExpression(new VariableRef(relationshipsAlias), index);
+            var relationship = new IndexExpression(relationships, index);
             return new CaseExpression(
                 new UnaryExpression(
                     CypherUnaryOperator.IsNull,
-                    new VariableRef(relationshipsAlias)),
+                    relationships),
                 new ListExpression([]),
                 new ListComprehensionExpression(
                     Function(
@@ -356,7 +393,7 @@ internal sealed class AgeInlineComplexPropertyProjectionPass : ICypherPass
                         new Literal(0),
                         new BinaryExpression(
                             CypherBinaryOperator.Subtract,
-                            Function("size", new VariableRef(relationshipsAlias)),
+                            Function("size", relationships),
                             new Literal(1))),
                     "i",
                     projection: new MapExpression(
@@ -373,11 +410,11 @@ internal sealed class AgeInlineComplexPropertyProjectionPass : ICypherPass
 
     private sealed class ProjectionExpressionRewriter
     {
-        private readonly List<string> hydrationAliases = [];
+        private readonly List<(string Alias, int Depth)> hydrationAliases = [];
 
         public bool Changed { get; private set; }
 
-        public List<string> HydrationAliases => hydrationAliases;
+        public List<(string Alias, int Depth)> HydrationAliases => hydrationAliases;
 
         public CypherExpression Rewrite(CypherExpression expression)
         {
@@ -385,9 +422,10 @@ internal sealed class AgeInlineComplexPropertyProjectionPass : ICypherPass
             {
                 Changed = true;
                 if (entity.LoadComplexProperties &&
-                    !hydrationAliases.Contains(entity.Alias, StringComparer.Ordinal))
+                    !hydrationAliases.Exists(candidate =>
+                        string.Equals(candidate.Alias, entity.Alias, StringComparison.Ordinal)))
                 {
-                    hydrationAliases.Add(entity.Alias);
+                    hydrationAliases.Add((entity.Alias, entity.ComplexPropertyDepth));
                 }
 
                 return NodeProjection(

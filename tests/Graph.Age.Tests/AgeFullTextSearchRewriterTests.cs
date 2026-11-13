@@ -109,18 +109,38 @@ public sealed class AgeFullTextSearchRewriterTests
 
         visitor.Visit(expression);
 
-        // AGE 1.8.0 segfaults on id(x) IN <list parameter>, so identity membership must render as a
-        // filtered list comprehension and never as an IN with id() on the left.
-        Assert.DoesNotContain("id(src) IN", visitor.Query.Text, StringComparison.Ordinal);
-        Assert.Contains(
-            "size([__cvoya_collection_item IN $",
-            visitor.Query.Text,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "__cvoya_collection_item = id(src)",
-            visitor.Query.Text,
-            StringComparison.Ordinal);
+        // AGE 1.8.0 segfaults on id(x) IN <agtype list parameter>. The residual predicate must
+        // unwind the ids and use one native identity equality instead.
+        Assert.Contains("UNWIND $", visitor.Query.Text, StringComparison.Ordinal);
+        Assert.Contains("id(src) = __cvoya_native_id_0", visitor.Query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("id(src) IN $", visitor.Query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("src.Id IN", visitor.Query.Text, StringComparison.Ordinal);
+        // The id equality stays adjacent to the MATCH so the native id lookup is pushed down.
+        Assert.True(
+            visitor.Query.Text.IndexOf("UNWIND $", StringComparison.Ordinal) <
+            visitor.Query.Text.IndexOf("MATCH (src:Person)", StringComparison.Ordinal),
+            visitor.Query.Text);
+        Assert.DoesNotContain("WITH *", visitor.Query.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BuildGraphIdFilter_MultipleIds_ProducesBoundedCypherText()
+    {
+        await using var store = new AgeGraphStore(
+            "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
+            "translation");
+        var ids = Enumerable.Range(1, 2_000).Select(id => (long)id).ToArray();
+        var source = store.Graph.Nodes<Person>();
+        var expression = AgeFullTextSearchRewriter.BuildGraphIdFilter(source.Expression, typeof(Person), ids);
+        var visitor = new CypherQueryVisitor(typeof(Person));
+
+        visitor.Visit(expression);
+
+        Assert.Contains("UNWIND $", visitor.Query.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(" OR id(src) = ", visitor.Query.Text, StringComparison.Ordinal);
+        Assert.True(
+            visitor.Query.Text.Length < 2_000,
+            $"The id filter should not embed the {ids.Length} selected ids; got {visitor.Query.Text.Length} characters.");
     }
 
     private static Expression StripQuote(Expression expression) =>

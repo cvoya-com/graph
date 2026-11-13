@@ -140,8 +140,10 @@ internal sealed class ComplexPropertyManager(AgeGraphContext context)
         }
 
         var result = await transaction.RunAsync(
-            $"MATCH (parent) WHERE size([parentGraphId IN $parentGraphIds WHERE id(parent) = parentGraphId]) > 0 " +
-            $"{string.Join(" ", clauses)} RETURN count(parent) AS affectedCount",
+            // Unwind the id list instead of id(parent) IN $parentGraphIds. AGE 1.8 returns agtype
+            // from id() and fails on an IN with an agtype list parameter; the equality form works
+            // on both versions and keeps the id lookup.
+            $"UNWIND $parentGraphIds AS parentGraphId MATCH (parent) WHERE id(parent) = parentGraphId {string.Join(" ", clauses)} RETURN count(parent) AS affectedCount",
             parameters,
             cancellationToken).ConfigureAwait(false);
         _ = await result.ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -449,11 +451,13 @@ internal sealed class ComplexPropertyManager(AgeGraphContext context)
         CancellationToken cancellationToken)
     {
         var findCypher = $@"
+            UNWIND $parentGraphIds AS parentGraphId
+            UNWIND $relationshipTypes AS relationshipType
             MATCH (parent)-[propertyRels*1..{GraphDataModel.DefaultDepthAllowed}]->(propertyNode)
-            WHERE size([parentGraphId IN $parentGraphIds WHERE id(parent) = parentGraphId]) > 0
+            WHERE id(parent) = parentGraphId
               AND size([age_hop IN range(0, size(propertyRels) - 1)
                         WHERE propertyRels[toInteger(age_hop)].{ComplexPropertyStorage.RelationshipMarkerProperty} = true]) = size(propertyRels)
-              AND propertyRels[toInteger(0)].inheritance_labels[toInteger(0)] IN $relationshipTypes
+              AND propertyRels[toInteger(0)].inheritance_labels[toInteger(0)] = relationshipType
             RETURN DISTINCT id(propertyNode) AS propertyNodeId";
 
         var result = await transaction.RunAsync(

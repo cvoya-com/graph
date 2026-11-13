@@ -374,6 +374,7 @@ public static class Labels
         PropertyToLabelCache.Clear();
         LabelToPropertyCache.Clear();
         MostDerivedTypeCache.Clear();
+        GraphDataModel.ClearComplexPropertyDepthCache();
     }
 
     /// <summary>

@@ -7,10 +7,12 @@
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
     <IsTestProject>false</IsTestProject>
-    
+    <RootNamespace>Graph.Performance.Tests</RootNamespace>
+    <AssemblyName>Graph.Neo4j.Performance.Tests</AssemblyName>
+
     <!-- Enable XML documentation for performance tests but suppress missing doc warnings -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    
+
     <!-- Benchmark inputs use deterministic, non-security-sensitive pseudo-random
          data so runs remain comparable; CA5394 is not applicable here. -->
     <NoWarn>$(NoWarn);RS1035;CS1591;CA5394</NoWarn>
@@ -32,13 +34,16 @@
     <ProjectReference Include="../../src/Graph.Neo4j/Graph.Neo4j.csproj" />
     <ProjectReference Include="../../src/Graph.Analyzers/Graph.Analyzers.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/Graph.Serialization.CodeGen/Graph.Serialization.CodeGen.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../Graph.Performance.Tests.Shared/Graph.Performance.Tests.Shared.csproj" />
   </ItemGroup>
 
-  <!-- Use package references for releases -->
+  <!-- Use package references for releases. Exactly one provider package is referenced so the
+       CodeGen generator it embeds under analyzers/ is registered only once. -->
   <ItemGroup Condition="'$(UseProjectReferences)' != 'true'">
     <PackageReference Include="Cvoya.Graph" />
     <PackageReference Include="Cvoya.Graph.Neo4j" />
     <PackageReference Include="Cvoya.Graph.Serialization" />
+    <ProjectReference Include="../Graph.Performance.Tests.Shared/Graph.Performance.Tests.Shared.csproj" />
   </ItemGroup>
 
 </Project>

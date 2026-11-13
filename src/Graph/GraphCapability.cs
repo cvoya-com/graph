@@ -102,5 +102,17 @@ public enum GraphCapability
     /// Simple-property collections preserve null elements, their positions, and their declared
     /// element type across persistence, materialization, updates, and supported predicates.
     /// </summary>
-    NullElementsInSimpleCollections
+    NullElementsInSimpleCollections,
+
+    /// <summary>
+    /// The provider can materialize declared <see cref="PropertyIndexDefinition"/> instances into
+    /// query-accelerating structures through <see cref="IGraphIndexMaintenance"/>.
+    /// </summary>
+    PropertyIndexes,
+
+    /// <summary>
+    /// The provider can materialize declared <see cref="PropertyAggregateDefinition"/> instances into
+    /// derived aggregate structures through <see cref="IGraphIndexMaintenance"/>.
+    /// </summary>
+    PropertyAggregateIndexes
 }

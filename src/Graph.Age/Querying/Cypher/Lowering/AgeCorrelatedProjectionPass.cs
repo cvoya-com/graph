@@ -434,7 +434,11 @@ internal sealed class AgeCorrelatedProjectionPass : ICypherPass
                             projection.LoadTargetProperties,
                             projection.IncludePathCoordinates,
                             ordering,
-                            projection.RowIdentityAliases));
+                            projection.RowIdentityAliases)
+                        {
+                            SourceComplexPropertyDepth = projection.SourceComplexPropertyDepth,
+                            TargetComplexPropertyDepth = projection.TargetComplexPropertyDepth,
+                        });
                         break;
                     }
 

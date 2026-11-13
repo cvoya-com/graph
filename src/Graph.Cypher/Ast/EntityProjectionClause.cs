@@ -177,4 +177,20 @@ public sealed record EntityProjectionClause : ICypherClause
     /// Gets additional aliases that distinguish input rows while node properties are loaded.
     /// </summary>
     public IReadOnlyList<string> RowIdentityAliases { get; }
+
+    /// <summary>
+    /// Gets or sets the maximum complex-property relationship depth for the source node.
+    /// </summary>
+    /// <remarks>
+    /// The planner sets this from the projected CLR type so the provider can bound its
+    /// complex-property traversal instead of always using the global storage range. The default
+    /// is the conservative storage bound for callers that cannot resolve the type.
+    /// </remarks>
+    public int SourceComplexPropertyDepth { get; init; } = GraphDataModel.DefaultDepthAllowed;
+
+    /// <summary>
+    /// Gets or sets the maximum complex-property relationship depth for the target node.
+    /// </summary>
+    /// <inheritdoc cref="SourceComplexPropertyDepth" />
+    public int TargetComplexPropertyDepth { get; init; } = GraphDataModel.DefaultDepthAllowed;
 }

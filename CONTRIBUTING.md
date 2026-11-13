@@ -95,7 +95,7 @@ Setting `CI=true` locally does not start either service.
 | `tests/Graph.QuerySurface.CompilationTests` | Compile-time query-surface contracts | None |
 | `tests/Graph.Serialization.CodeGen.Tests` | Incremental serializer generator | None |
 | `tests/Graph.Analyzers.Tests` | Roslyn analyzer diagnostics | None |
-| `tests/Graph.Performance.Tests` | Benchmarks; outside normal gates | Provider-specific benchmark setup |
+| `tests/Graph.Neo4j.Performance.Tests`, `tests/Graph.Age.Performance.Tests` (shared code in `tests/Graph.Performance.Tests.Shared`) | Benchmarks; outside normal gates | Provider-specific benchmark setup |
 
 Provider-agnostic behavior belongs in the TCK so every provider binding inherits it. Running
 `src/Graph.CompatibilityTests` alone proves nothing; see the

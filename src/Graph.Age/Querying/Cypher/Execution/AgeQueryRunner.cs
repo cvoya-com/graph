@@ -10,6 +10,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Cvoya.Graph.Age.Querying;
+using Cvoya.Graph.Age.Querying.Cypher.Lowering;
 using Cvoya.Graph.Age.Schema;
 using Cvoya.Graph.Age.Serialization;
 using Cvoya.Graph.Cypher.Ast;
@@ -27,6 +28,10 @@ internal sealed partial class AgeQueryRunner
     private readonly ILogger<AgeQueryRunner> logger;
     private readonly Action? batchExecutionObserver;
     private readonly Func<AgeBatchCommand, AgeBatchCommand>? batchCommandTransform;
+    private readonly bool indexesProvisioned;
+    private readonly AgeIndexCatalog indexCatalog;
+    private readonly AgeIndexPresenceCache indexPresenceCache;
+    private readonly long provisionedCatalogVersion;
 
     public AgeQueryRunner(
         string graphName,
@@ -34,13 +39,21 @@ internal sealed partial class AgeQueryRunner
         NpgsqlTransaction transaction,
         ILoggerFactory? loggerFactory,
         Action? batchExecutionObserver = null,
-        Func<AgeBatchCommand, AgeBatchCommand>? batchCommandTransform = null)
+        Func<AgeBatchCommand, AgeBatchCommand>? batchCommandTransform = null,
+        bool indexesProvisioned = false,
+        AgeIndexCatalog? indexCatalog = null,
+        AgeIndexPresenceCache? indexPresenceCache = null,
+        long provisionedCatalogVersion = 0)
     {
         this.graphName = AgeSqlIdentifier.Validate(graphName, "graph name");
         this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
         this.transaction = transaction ?? throw new ArgumentNullException(nameof(transaction));
         this.batchExecutionObserver = batchExecutionObserver;
         this.batchCommandTransform = batchCommandTransform;
+        this.indexesProvisioned = indexesProvisioned;
+        this.indexCatalog = indexCatalog ?? AgeIndexCatalog.Empty;
+        this.indexPresenceCache = indexPresenceCache ?? new AgeIndexPresenceCache();
+        this.provisionedCatalogVersion = provisionedCatalogVersion;
         logger = loggerFactory?.CreateLogger<AgeQueryRunner>() ?? NullLogger<AgeQueryRunner>.Instance;
     }
 
@@ -111,6 +124,14 @@ internal sealed partial class AgeQueryRunner
             NpgsqlDbType = NpgsqlDbType.Unknown,
         });
         await createCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!relationship && indexesProvisioned && !indexCatalog.IsEmpty)
+        {
+            await AgeIndexMaintenance
+                .EnsureLabelAsync(connection, transaction, graphName, label, indexCatalog, cancellationToken)
+                .ConfigureAwait(false);
+            indexPresenceCache.Clear();
+        }
     }
 
     private async Task<bool> LabelExistsAsync(
@@ -430,13 +451,23 @@ internal sealed partial class AgeQueryRunner
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
         CancellationToken cancellationToken) =>
-        RunAsync(cypher, parameters, projectionColumns, postProcessing: null, cancellationToken);
+        RunAsync(cypher, parameters, projectionColumns, postProcessing: null, plan: null, cancellationToken);
 
     public async Task<AgeResultCursor> RunAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
         CypherPostProcessing? postProcessing,
+        CancellationToken cancellationToken) =>
+        await RunAsync(cypher, parameters, projectionColumns, postProcessing, plan: null, cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<AgeResultCursor> RunAsync(
+        string cypher,
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
+        AgeExecutionPlan? plan,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
@@ -444,7 +475,15 @@ internal sealed partial class AgeQueryRunner
         ArgumentNullException.ThrowIfNull(projectionColumns);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var (command, distinct) = PrepareCommand(cypher, parameters, projectionColumns, postProcessing, streaming: false);
+        var (command, distinct) = await PrepareCommandAsync(
+                cypher,
+                parameters,
+                projectionColumns,
+                postProcessing,
+                plan,
+                streaming: false,
+                cancellationToken)
+            .ConfigureAwait(false);
         await using var commandLease = command.ConfigureAwait(false);
 
         try
@@ -575,13 +614,23 @@ internal sealed partial class AgeQueryRunner
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
         CancellationToken cancellationToken) =>
-        RunStreamingAsync(cypher, parameters, projectionColumns, postProcessing: null, cancellationToken);
+        RunStreamingAsync(cypher, parameters, projectionColumns, postProcessing: null, plan: null, cancellationToken);
 
     public async Task<AgeResultCursor> RunStreamingAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
         CypherPostProcessing? postProcessing,
+        CancellationToken cancellationToken) =>
+        await RunStreamingAsync(cypher, parameters, projectionColumns, postProcessing, plan: null, cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<AgeResultCursor> RunStreamingAsync(
+        string cypher,
+        IReadOnlyDictionary<string, object?> parameters,
+        IReadOnlyList<string> projectionColumns,
+        CypherPostProcessing? postProcessing,
+        AgeExecutionPlan? plan,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
@@ -589,7 +638,15 @@ internal sealed partial class AgeQueryRunner
         ArgumentNullException.ThrowIfNull(projectionColumns);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var (command, distinct) = PrepareCommand(cypher, parameters, projectionColumns, postProcessing, streaming: true);
+        var (command, distinct) = await PrepareCommandAsync(
+                cypher,
+                parameters,
+                projectionColumns,
+                postProcessing,
+                plan,
+                streaming: true,
+                cancellationToken)
+            .ConfigureAwait(false);
 
         try
         {
@@ -615,25 +672,273 @@ internal sealed partial class AgeQueryRunner
         }
     }
 
-    private (NpgsqlCommand Command, bool Distinct) PrepareCommand(
+    private async Task<(NpgsqlCommand Command, bool Distinct)> PrepareCommandAsync(
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
         CypherPostProcessing? postProcessing,
-        bool streaming)
+        AgeExecutionPlan? plan,
+        bool streaming,
+        CancellationToken cancellationToken)
     {
-        var (normalizedCypher, effectiveColumns, distinct) = NormalizeCommand(cypher, projectionColumns);
+        var executionCypher = cypher;
+        var effectiveParameters = parameters;
+        var effectivePostProcessing = postProcessing;
+        var effectivePlan = plan;
+        if (plan is AgePageSelectionPlan pagePlan)
+        {
+            if (await HasTablesAsync(pagePlan.Labels, cancellationToken).ConfigureAwait(false))
+            {
+                var pageIds = await ReadPageIdsAsync(pagePlan, cancellationToken).ConfigureAwait(false);
+                executionCypher = InjectPageIds(cypher, pagePlan.Alias);
+                effectiveParameters = new Dictionary<string, object?>(parameters, StringComparer.Ordinal)
+                {
+                    [PageIdsParameterName] = pageIds,
+                };
+                if (pagePlan.ClauseLevelPaging)
+                {
+                    // The id predicate already selects the page, so the original SKIP/LIMIT would
+                    // page the page a second time. ORDER BY stays so the selected page is returned
+                    // in the requested order.
+                    executionCypher = RemoveClauseLevelPaging(executionCypher);
+                }
+
+                effectivePostProcessing = postProcessing is null
+                    ? null
+                    : postProcessing with { Skip = null, Limit = null };
+            }
+            else
+            {
+                // A missing physical label is a valid empty result on the AGE path; a direct
+                // SQL plan must not turn it into a catalog error.
+                effectivePlan = null;
+            }
+        }
+
+        if (plan is AgeSqlPlan sqlPlan)
+        {
+            var available = sqlPlan.Kind == "containment"
+                ? await HasTablesAsync(sqlPlan.RequiredTableNames, cancellationToken).ConfigureAwait(false)
+                : await HasIndexStructuresAsync(sqlPlan.RequiredTableNames, cancellationToken).ConfigureAwait(false);
+            if (!available)
+            {
+                effectivePlan = null;
+            }
+        }
+
+        var (normalizedCypher, effectiveColumns, distinct) = NormalizeCommand(executionCypher, projectionColumns);
         cypher = normalizedCypher;
-        var command = CreateCommand(cypher, parameters, effectiveColumns, postProcessing);
+        var command = CreateCommand(cypher, effectiveParameters, effectiveColumns, effectivePostProcessing, effectivePlan);
         if (streaming)
         {
-            logger.LogDebugAgeQueryRunner159(parameters.Count, effectiveColumns.Count, cypher);
+            logger.LogDebugAgeQueryRunner159(effectiveParameters.Count, effectiveColumns.Count, cypher);
         }
         else
         {
-            logger.LogDebugAgeQueryRunner167(parameters.Count, effectiveColumns.Count, cypher);
+            logger.LogDebugAgeQueryRunner167(effectiveParameters.Count, effectiveColumns.Count, cypher);
         }
         return (command, distinct);
+    }
+
+    /// <summary>
+    /// Reads the final page ids for a complex-property paging plan with one indexed query over the
+    /// label tables. When every label has a declared equality companion for the sort property, the
+    /// query orders by the companion text column and its B-tree instead of the unindexed AGE
+    /// accessor; otherwise it keeps the accessor ordering. The query reads at most one branch limit
+    /// per label instead of loading every candidate complex property first.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100", Justification = "SQL is composed from provider-quoted identifiers and parameter placeholders; all values are bound parameters.")]
+    private async Task<List<long>> ReadPageIdsAsync(
+        AgePageSelectionPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var branchLimit = plan.Skip + plan.Limit;
+        var sortAlias = AgeIndexTable.QuoteIdentifier("__page_sort", "column alias");
+        var direction = plan.Descending ? "DESC" : "ASC";
+        var sortExpression =
+            "ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, " +
+            AgeIndexTable.AgtypeStringLiteral(plan.SortProperty) + "])";
+        var union = new StringBuilder();
+        var labels = plan.Labels.Distinct(StringComparer.Ordinal).ToArray();
+        var sources = plan.Sources
+            .Where(source => labels.Contains(source.Label, StringComparer.Ordinal))
+            .GroupBy(source => source.Label, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var useCompanion = sources.Count == labels.Length &&
+            await PageSourcesAvailableAsync(sources.Values.ToArray(), cancellationToken).ConfigureAwait(false);
+        var indexAlias = AgeIndexTable.QuoteIdentifier("__page_index", "table alias");
+        var idColumn = AgeIndexTable.QuoteIdentifier(AgeIndexTable.IdColumn, "column name");
+        for (var index = 0; index < labels.Length; index++)
+        {
+            if (index > 0)
+            {
+                union.AppendLine().AppendLine("UNION ALL");
+            }
+
+            var label = labels[index];
+            union.Append("(SELECT ");
+            if (useCompanion)
+            {
+                // The companion table already carries the vertex id next to the sort column, so
+                // read it directly. Joining the label table would force a full label scan and
+                // turn an index-ordered LIMIT into a sort of every candidate row.
+                var source = sources[label];
+                union.Append(indexAlias).Append('.').Append(idColumn)
+                    .Append(", ").Append(indexAlias).Append('.')
+                    .Append(AgeIndexTable.QuoteIdentifier(source.ColumnName, "column name"))
+                    .Append(" AS ").Append(sortAlias)
+                    .Append(" FROM ")
+                    .Append(AgeIndexTable.QualifiedTable(graphName, label, source.TableName))
+                    .Append(" AS ").Append(indexAlias);
+            }
+            else
+            {
+                union.Append(idColumn).Append(", ").Append(sortExpression)
+                    .Append(" AS ").Append(sortAlias)
+                    .Append(" FROM ").Append(AgeIndexTable.QualifiedLabelTable(graphName, label));
+            }
+
+            union.Append(" ORDER BY ").Append(sortAlias).Append(' ').Append(direction)
+                .Append(" LIMIT ").Append(branchLimit.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append(')');
+        }
+
+        var sql = new StringBuilder()
+            .Append("SELECT ").Append(idColumn).Append("::text::bigint FROM (")
+            .AppendLine()
+            .AppendLine(union.ToString())
+            .Append(") AS ").Append(AgeIndexTable.QuoteIdentifier("__page", "table alias"))
+            .AppendLine()
+            .Append("ORDER BY ").Append(sortAlias).Append(' ').Append(direction)
+            .Append(" OFFSET ").Append(plan.Skip.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append(" LIMIT ").Append(plan.Limit.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .ToString();
+
+        var command = connection.CreateCommand();
+        await using var commandLease = command.ConfigureAwait(false);
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        var ids = new List<long>();
+        var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var readerLease = reader.ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            ids.Add(reader.GetInt64(0));
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Probes that every companion table and text column the paging plan wants to read exists. A
+    /// missing or stale companion keeps the correct accessor ordering instead of turning the page
+    /// query into a missing-relation or missing-column error.
+    /// </summary>
+    private async Task<bool> PageSourcesAvailableAsync(
+        AgePageSource[] sources,
+        CancellationToken cancellationToken)
+    {
+        if (sources.Length == 0)
+        {
+            return false;
+        }
+
+        var tables = sources
+            .Select(source => source.TableName)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var command = connection.CreateCommand();
+        await using var commandLease = command.ConfigureAwait(false);
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = @graphName
+              AND table_name = ANY(@tables)
+            """;
+        command.Parameters.AddWithValue("graphName", graphName);
+        command.Parameters.Add(new NpgsqlParameter("tables", NpgsqlDbType.Array | NpgsqlDbType.Text)
+        {
+            Value = tables,
+        });
+        var present = new HashSet<(string Table, string Column)>();
+        var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var readerLease = reader.ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            present.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        return sources.All(source => present.Contains((source.TableName, source.ColumnName)));
+    }
+
+    private const string PageIdsParameterName = "__cvoya_page_ids";
+    private const string PageIdVariable = "__cvoya_page_id";
+
+    /// <summary>
+    /// Rewrites every root match of a page plan to join the exact final-page id list. The ids are
+    /// passed as one agtype list parameter and unwound, so each root match is an id equality lookup.
+    /// </summary>
+    /// <remarks>
+    /// A literal <c>IN [id, ...]</c> list is not portable: AGE 1.8 returns agtype from <c>id()</c>
+    /// and rejects an untyped numeric list with <c>XX000: not a common type</c>, while a cast list
+    /// still fails or crashes for more than one element. An OR chain of equalities is portable but
+    /// makes the planner scan the label table (a 30k L19 page regresses from ~16 ms to ~120 ms).
+    /// Unwinding a parameter list keeps the native id equality and works on both AGE versions.
+    /// </remarks>
+    internal static string InjectPageIds(string cypher, string alias)
+    {
+        var unwind = $"UNWIND ${PageIdsParameterName} AS {PageIdVariable}";
+        var predicate = $"id({alias}) = {PageIdVariable}";
+        var matchPrefix = "MATCH (" + alias + ":";
+        var builder = new StringBuilder(cypher.Length + (unwind.Length + predicate.Length) * 2);
+        foreach (var line in cypher.Split('\n'))
+        {
+            var trimmed = line.TrimEnd('\r');
+            // Match the rendered root MATCH by its alias prefix so an escaped or non-ASCII label
+            // (which is still a valid root pattern) receives the page ids as well.
+            if (trimmed.StartsWith(matchPrefix, StringComparison.Ordinal) &&
+                trimmed.EndsWith(')'))
+            {
+                builder.AppendLine(unwind);
+                builder.AppendLine(line);
+                builder.Append("WHERE ").Append(predicate).AppendLine();
+                continue;
+            }
+
+            builder.AppendLine(line);
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Removes the trailing <c>SKIP</c>/<c>LIMIT</c> clauses of a single-label query after the page
+    /// id predicate has already selected the page. The trailing <c>ORDER BY</c> is kept so the
+    /// injected page is returned in the requested order.
+    /// </summary>
+    private static string RemoveClauseLevelPaging(string cypher)
+    {
+        var lines = cypher.Split('\n').ToList();
+        for (var index = lines.Count - 1; index >= 0; index--)
+        {
+            var trimmed = lines[index].Trim();
+            if (trimmed.Length == 0)
+            {
+                continue;
+            }
+
+            if (trimmed.StartsWith("SKIP ", StringComparison.Ordinal) ||
+                trimmed.StartsWith("LIMIT ", StringComparison.Ordinal))
+            {
+                lines.RemoveAt(index);
+                continue;
+            }
+
+            break;
+        }
+
+        return string.Join('\n', lines);
     }
 
     /// <summary>
@@ -685,9 +990,10 @@ internal sealed partial class AgeQueryRunner
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
-        CypherPostProcessing? postProcessing = null)
+        CypherPostProcessing? postProcessing = null,
+        AgeExecutionPlan? plan = null)
     {
-        var definition = CreateCommandDefinition(cypher, parameters, projectionColumns, postProcessing);
+        var definition = CreateCommandDefinition(cypher, parameters, projectionColumns, postProcessing, plan);
         var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = definition.CommandText;
@@ -699,7 +1005,8 @@ internal sealed partial class AgeQueryRunner
         string cypher,
         IReadOnlyDictionary<string, object?> parameters,
         IReadOnlyList<string> projectionColumns,
-        CypherPostProcessing? postProcessing = null)
+        CypherPostProcessing? postProcessing = null,
+        AgeExecutionPlan? plan = null)
     {
         var serializedParameters = JsonSerializer.Serialize(
             parameters.ToDictionary(pair => pair.Key, pair => NormalizeParameter(pair.Value), StringComparer.Ordinal));
@@ -708,7 +1015,8 @@ internal sealed partial class AgeQueryRunner
             cypher,
             projectionColumns,
             postProcessing,
-            parameterPlaceholder: "@agtypeParams");
+            parameterPlaceholder: "@agtypeParams",
+            plan);
         var parameter = new NpgsqlParameter
         {
             ParameterName = "agtypeParams",
@@ -717,6 +1025,333 @@ internal sealed partial class AgeQueryRunner
         };
         return (commandText, parameter);
     }
+
+    /// <summary>
+    /// Gates a plan or write on the catalog snapshot this store actually provisioned. A declaration
+    /// added after maintenance must not make an existing table look complete.
+    /// </summary>
+    private async Task<bool> HasIndexStructuresAsync(
+        IReadOnlyList<string> tableNames,
+        CancellationToken cancellationToken)
+    {
+        if (indexCatalog.Version != provisionedCatalogVersion)
+        {
+            return false;
+        }
+
+        return await HasTablesAsync(tableNames, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Probes whether every required physical relation exists.</summary>
+    private async Task<bool> HasTablesAsync(
+        IReadOnlyList<string> tableNames,
+        CancellationToken cancellationToken)
+    {
+        if (tableNames.Count == 0)
+        {
+            return false;
+        }
+
+        var distinct = tableNames.Distinct(StringComparer.Ordinal).ToArray();
+        if (indexPresenceCache.TryGet(graphName, indexCatalog.Version, distinct, out var cached))
+        {
+            return cached;
+        }
+
+        var command = connection.CreateCommand();
+        await using var commandLease = command.ConfigureAwait(false);
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT count(*)
+            FROM information_schema.tables
+            WHERE table_schema = @graphName
+              AND table_name = ANY(@tables)
+            """;
+        command.Parameters.AddWithValue("graphName", graphName);
+        command.Parameters.Add(new NpgsqlParameter("tables", NpgsqlDbType.Array | NpgsqlDbType.Text)
+        {
+            Value = distinct,
+        });
+        var count = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        var present = count is long value && value == distinct.Length;
+        indexPresenceCache.Set(graphName, indexCatalog.Version, distinct, present);
+        return present;
+    }
+
+    /// <summary>
+    /// Executes one companion-table write and turns the documented atomic drop window into
+    /// actionable retry guidance. Only the tables this label actually targets are matched.
+    /// </summary>
+    private async Task ExecuteIndexWriteAsync(
+        NpgsqlCommand command,
+        string label,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException exception) when (IsMissingDeclaredStructure(exception, label, tableName))
+        {
+            throw new GraphException(
+                $"The declared index structures for label '{label}' were dropped by another instance " +
+                "within the presence-cache TTL. Retry the write, or run EnsureIndexesAsync to recreate them.",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// Matches a 42P01 error against the companion table this label writes, plus its aggregate
+    /// tables because the insert trigger touches them in the same statement.
+    /// </summary>
+    private bool IsMissingDeclaredStructure(
+        PostgresException exception,
+        string label,
+        string tableName)
+    {
+        if (!string.Equals(exception.SqlState, PostgresErrorCodes.UndefinedTable, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(exception.SchemaName) &&
+            !string.Equals(exception.SchemaName, graphName, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var missing = exception.TableName;
+        if (string.IsNullOrEmpty(missing))
+        {
+            var match = Regex.Match(
+                exception.MessageText,
+                "relation \"(?<name>[^\"]+)\" does not exist",
+                RegexOptions.CultureInvariant);
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            missing = match.Groups["name"].Value;
+        }
+
+        var separator = missing.LastIndexOf('.');
+        if (separator >= 0)
+        {
+            missing = missing[(separator + 1)..];
+        }
+
+        missing = missing.Trim('"');
+        if (string.Equals(missing, tableName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        foreach (var aggregate in indexCatalog.GetAggregates(label))
+        {
+            if (string.Equals(missing, aggregate.TableName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Writes every declared index column for a newly created node.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100", Justification = "SQL is composed from provider-quoted identifiers and parameter placeholders; all values are bound parameters.")]
+    internal async Task WriteIndexAsync(
+        string label,
+        long graphId,
+        IReadOnlyDictionary<string, object?> properties,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(label);
+        ArgumentNullException.ThrowIfNull(properties);
+
+        var textColumns = indexCatalog.GetProperties(label);
+        var valueColumns = indexCatalog.GetValueColumns(label);
+        if (textColumns.Count == 0 && valueColumns.Count == 0)
+        {
+            return;
+        }
+
+        var tableName = indexCatalog.GetTableName(label);
+        if (string.IsNullOrEmpty(tableName) ||
+            !await HasIndexStructuresAsync([tableName], cancellationToken).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        var columns = new List<string> { AgeIndexTable.QuoteIdentifier(AgeIndexTable.IdColumn, "column name") };
+        var values = new List<string> { "@id::text::ag_catalog.graphid" };
+        var updates = new List<string>();
+        var command = connection.CreateCommand();
+        await using var commandLease = command.ConfigureAwait(false);
+        command.Transaction = transaction;
+        var parameterIndex = 0;
+        foreach (var column in textColumns)
+        {
+            var name = AgeIndexTable.QuoteIdentifier(column.ColumnName, "column name");
+            columns.Add(name);
+            var parameter = "p" + parameterIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            parameterIndex++;
+            values.Add("@" + parameter);
+            updates.Add($"{name} = EXCLUDED.{name}");
+            command.Parameters.AddWithValue(
+                parameter,
+                properties.TryGetValue(column.Property, out var propertyValue) && propertyValue is not null
+                    ? FormatIndexText(propertyValue)
+                    : DBNull.Value);
+        }
+
+        foreach (var column in valueColumns)
+        {
+            var name = AgeIndexTable.QuoteIdentifier(column.ColumnName, "column name");
+            columns.Add(name);
+            var parameter = "p" + parameterIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            parameterIndex++;
+            values.Add("@" + parameter);
+            updates.Add($"{name} = EXCLUDED.{name}");
+            command.Parameters.AddWithValue(
+                parameter,
+                properties.TryGetValue(column.Property, out var propertyValue)
+                    ? NormalizeNumeric(propertyValue)
+                    : DBNull.Value);
+        }
+
+        command.Parameters.AddWithValue("id", graphId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        command.CommandText =
+            $"INSERT INTO {AgeIndexTable.QualifiedTable(graphName, label, tableName)} " +
+            $"({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)}) " +
+            $"ON CONFLICT ({AgeIndexTable.QuoteIdentifier(AgeIndexTable.IdColumn, "column name")}) DO UPDATE SET " +
+            string.Join(", ", updates);
+        await ExecuteIndexWriteAsync(command, label, tableName, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Refreshes every declared index column for nodes changed by an update.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100", Justification = "SQL is composed from provider-quoted identifiers and parameter placeholders; all values are bound parameters.")]
+    internal async Task SyncIndexAsync(
+        IReadOnlyList<long> graphIds,
+        IReadOnlyList<string> labels,
+        CancellationToken cancellationToken)
+    {
+        if (graphIds.Count == 0 || labels.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var label in labels)
+        {
+            var textColumns = indexCatalog.GetProperties(label);
+            var valueColumns = indexCatalog.GetValueColumns(label);
+            if (textColumns.Count == 0 && valueColumns.Count == 0)
+            {
+                continue;
+            }
+
+            var tableName = indexCatalog.GetTableName(label);
+            if (string.IsNullOrEmpty(tableName) ||
+                !await HasIndexStructuresAsync([tableName], cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            var columns = new List<string> { AgeIndexTable.QuoteIdentifier(AgeIndexTable.IdColumn, "column name") };
+            var values = new List<string> { "id" };
+            var updates = new List<string>();
+            foreach (var column in textColumns)
+            {
+                var name = AgeIndexTable.QuoteIdentifier(column.ColumnName, "column name");
+                columns.Add(name);
+                values.Add(AgeIndexTable.TextValueSql(column.Property));
+                updates.Add($"{name} = EXCLUDED.{name}");
+            }
+
+            foreach (var column in valueColumns)
+            {
+                var name = AgeIndexTable.QuoteIdentifier(column.ColumnName, "column name");
+                columns.Add(name);
+                values.Add(AgeIndexTable.NumericValueSql(column.Property));
+                updates.Add($"{name} = EXCLUDED.{name}");
+            }
+
+            var command = connection.CreateCommand();
+            await using var commandLease = command.ConfigureAwait(false);
+            command.Transaction = transaction;
+            command.CommandText =
+                $"INSERT INTO {AgeIndexTable.QualifiedTable(graphName, label, tableName)} " +
+                $"({string.Join(", ", columns)}) " +
+                $"SELECT {string.Join(", ", values)} FROM {AgeIndexTable.QualifiedLabelTable(graphName, label)} " +
+                "WHERE id::text::bigint = ANY(@ids) " +
+                $"ON CONFLICT ({AgeIndexTable.QuoteIdentifier(AgeIndexTable.IdColumn, "column name")}) " +
+                "DO UPDATE SET " + string.Join(", ", updates);
+            command.Parameters.Add(new NpgsqlParameter("ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint)
+            {
+                Value = graphIds.ToArray(),
+            });
+            await ExecuteIndexWriteAsync(command, label, tableName, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Removes every declared index row for deleted nodes.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100", Justification = "SQL is composed from provider-quoted identifiers and parameter placeholders; all values are bound parameters.")]
+    internal async Task DeleteIndexAsync(
+        IReadOnlyList<long> graphIds,
+        IReadOnlyList<string> labels,
+        CancellationToken cancellationToken)
+    {
+        if (graphIds.Count == 0 || labels.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var label in labels)
+        {
+            var tableName = indexCatalog.GetTableName(label);
+            if (string.IsNullOrEmpty(tableName) ||
+                !await HasIndexStructuresAsync([tableName], cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            var command = connection.CreateCommand();
+            await using var commandLease = command.ConfigureAwait(false);
+            command.Transaction = transaction;
+            command.CommandText =
+                $"DELETE FROM {AgeIndexTable.QualifiedTable(graphName, label, tableName)} " +
+                "WHERE id::text::bigint = ANY(@ids)";
+            command.Parameters.Add(new NpgsqlParameter("ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint)
+            {
+                Value = graphIds.ToArray(),
+            });
+            await ExecuteIndexWriteAsync(command, label, tableName, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Renders a create-path value the same way the backfill's <c>jsonb ->></c> expression does, so
+    /// a row's companion text stays stable across create, update, and re-ensure.
+    /// </summary>
+    private static object FormatIndexText(object value)
+    {
+        var json = JsonSerializer.Serialize(value, value.GetType());
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind switch
+        {
+            JsonValueKind.String => document.RootElement.GetString() ?? string.Empty,
+            JsonValueKind.Null => DBNull.Value,
+            _ => document.RootElement.GetRawText(),
+        };
+    }
+
+    private static object NormalizeNumeric(object? value) => value switch
+    {
+        null => DBNull.Value,
+        sbyte or byte or short or ushort or int or uint or long or ulong or decimal or float or double => value,
+        _ => DBNull.Value,
+    };
 
     /// <summary>
     /// Builds the SQL that executes one lowered Cypher statement and applies the row shaping the
@@ -735,12 +1370,24 @@ internal sealed partial class AgeQueryRunner
         string cypher,
         IReadOnlyList<string> projectionColumns,
         CypherPostProcessing? postProcessing,
-        string parameterPlaceholder = "@agtypeParams")
+        string parameterPlaceholder = "@agtypeParams",
+        AgeExecutionPlan? plan = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(graphName);
         ArgumentException.ThrowIfNullOrWhiteSpace(cypher);
         ArgumentNullException.ThrowIfNull(projectionColumns);
         ArgumentException.ThrowIfNullOrWhiteSpace(parameterPlaceholder);
+
+        if (plan is AgeSqlPlan sqlPlan)
+        {
+            var planGraphName = AgeSqlIdentifier.Validate(graphName, "graph name");
+            return sqlPlan.Sql
+                .Replace(
+                    AgeIndexTable.GraphToken,
+                    AgeSqlIdentifier.Quote(planGraphName, "graph name"),
+                    StringComparison.Ordinal)
+                .Replace(AgeIndexTable.ParameterToken, parameterPlaceholder, StringComparison.Ordinal);
+        }
 
         if (projectionColumns.Count == 0)
         {

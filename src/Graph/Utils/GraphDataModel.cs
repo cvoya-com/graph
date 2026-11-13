@@ -4,6 +4,7 @@
 namespace Cvoya.Graph;
 
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Reflection;
 
 
@@ -72,6 +73,475 @@ public static class GraphDataModel
     public static IEnumerable<PropertyInfo> GetComplexProperties(Type type) =>
         type.GetProperties()
             .Where(p => IsComplex(p.PropertyType) || IsCollectionOfComplex(p.PropertyType));
+
+    private static readonly ConcurrentDictionary<(Type Type, int MaximumDepth), int> ComplexPropertyDepths = new();
+    private static readonly object DerivedTypeIndexLock = new();
+    private static IReadOnlyDictionary<Type, Type[]>? derivedTypesByBase;
+    private static int derivedTypeIndexBuildCount;
+    private static int derivedTypeIndexGeneration;
+    private static WeakReference<Assembly>[] derivedTypeIndexAssemblies = [];
+
+    static GraphDataModel()
+    {
+        derivedTypeIndexAssemblies = SnapshotAssemblies(AppDomain.CurrentDomain.GetAssemblies());
+
+        // The bound of a non-sealed value type includes the derived types that are loaded. A
+        // derived type discovered after the first query must invalidate the memoized depth and the
+        // shared derived-type index, or hydration would keep the smaller bound of the earlier type
+        // set.
+        AppDomain.CurrentDomain.AssemblyLoad += static (_, _) => InvalidateDerivedTypeIndex();
+    }
+
+    /// <summary>
+    /// Gets a counter that changes whenever the set of loaded assemblies invalidates the
+    /// derived-type index.
+    /// </summary>
+    internal static int DerivedTypeIndexGeneration => Volatile.Read(ref derivedTypeIndexGeneration);
+
+    /// <summary>Gets how many times the shared derived-type index has been built (test seam).</summary>
+    internal static int DerivedTypeIndexBuildCount => Volatile.Read(ref derivedTypeIndexBuildCount);
+
+    /// <summary>
+    /// Checks the loaded-assembly set at plan time and invalidates a derived-type index that a
+    /// missed or concurrent load made stale.
+    /// </summary>
+    internal static void EnsureDerivedTypeIndexCurrent() =>
+        EnsureDerivedTypeIndexCurrent(AppDomain.CurrentDomain.GetAssemblies());
+
+    /// <summary>
+    /// Checks the supplied loaded-assembly identity set and invalidates a derived-type index built
+    /// from a different set. The array overload is a test seam; production always supplies the
+    /// current AppDomain set.
+    /// </summary>
+    internal static void EnsureDerivedTypeIndexCurrent(Assembly[] assemblies)
+    {
+        ArgumentNullException.ThrowIfNull(assemblies);
+
+        lock (DerivedTypeIndexLock)
+        {
+            if (AssembliesMatch(derivedTypeIndexAssemblies, assemblies))
+            {
+                return;
+            }
+
+            InvalidateDerivedTypeIndex();
+            Volatile.Write(ref derivedTypeIndexAssemblies, SnapshotAssemblies(assemblies));
+        }
+    }
+
+    /// <summary>Resets the derived-type index and depth cache for deterministic tests.</summary>
+    internal static void ResetDerivedTypeIndexForTests()
+    {
+        lock (DerivedTypeIndexLock)
+        {
+            Volatile.Write(ref derivedTypesByBase, null);
+            Volatile.Write(ref derivedTypeIndexBuildCount, 0);
+            Volatile.Write(
+                ref derivedTypeIndexAssemblies,
+                SnapshotAssemblies(AppDomain.CurrentDomain.GetAssemblies()));
+        }
+
+        ComplexPropertyDepths.Clear();
+    }
+
+    /// <summary>
+    /// Snapshots the loaded assemblies as weak references. The snapshot is compared on every plan,
+    /// so it must not keep a collectible plugin assembly alive after its unload. The runtime returns
+    /// each loaded assembly once, so an order-insensitive identity-set comparison is sufficient.
+    /// </summary>
+    private static WeakReference<Assembly>[] SnapshotAssemblies(Assembly[] assemblies)
+    {
+        var snapshot = new WeakReference<Assembly>[assemblies.Length];
+        for (var index = 0; index < assemblies.Length; index++)
+        {
+            snapshot[index] = new WeakReference<Assembly>(assemblies[index]);
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Compares the stored weak identity snapshot with the current loaded assemblies in one pass.
+    /// A missing weak target means the assembly was collected (unloaded); comparing by identity
+    /// still rejects a same-count unload-plus-load swap, which a count comparison would accept.
+    /// </summary>
+    private static bool AssembliesMatch(
+        WeakReference<Assembly>[] snapshot,
+        Assembly[] current)
+    {
+        if (snapshot.Length != current.Length)
+        {
+            return false;
+        }
+
+        var loaded = new HashSet<Assembly>(current, ReferenceEqualityComparer.Instance);
+        foreach (var reference in snapshot)
+        {
+            if (!reference.TryGetTarget(out var assembly) || !loaded.Contains(assembly))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void InvalidateDerivedTypeIndex()
+    {
+        ClearComplexPropertyDepthCache();
+        Interlocked.Increment(ref derivedTypeIndexGeneration);
+    }
+
+
+    /// <summary>
+    /// Gets the maximum number of complex-property relationships between an instance of
+    /// <paramref name="type"/> and its deepest declared complex value.
+    /// </summary>
+    /// <remarks>
+    /// The result is the bound a read-side complex-property traversal needs for the type; for a
+    /// depth-1 property such as <c>Address</c> it is one, so the traversal does not have to scan
+    /// the global <see cref="DefaultDepthAllowed"/> range. Collection element types contribute
+    /// their element depth, and a type that recursively references itself is reported as
+    /// <paramref name="maximumDepth"/>: writes reject such data, but legacy rows must never be
+    /// under-hydrated.
+    /// <para>
+    /// A non-sealed value type can store an instance of a derived type, and hydration resolves the
+    /// concrete type from the stored metadata. The bound therefore also walks every concrete type
+    /// derived from the property type that is loaded in the current process, so a derived-only
+    /// nested complex value keeps its full depth without falling back to the global maximum. The
+    /// derived set follows the same loaded-assembly rule as label resolution; the cache is cleared
+    /// when a new assembly is loaded.
+    /// </para>
+    /// <para>
+    /// A collectible plugin assembly is never retained by the shared derived-type index or depth
+    /// cache: a cached <see cref="Type"/> would root its assembly load context and prevent the
+    /// plugin from unloading. A collectible type is measured against a transient all-loaded-assembly
+    /// index instead. A non-collectible base can also be extended by a collectible plugin type, so
+    /// while plugin assemblies are loaded the shared index is combined with a transient scan of
+    /// those plugins. Only the resulting integer is cached; no plugin <see cref="Type"/> survives
+    /// the measurement.
+    /// </para>
+    /// </remarks>
+    /// <param name="type">The root entity or complex value type.</param>
+    /// <param name="maximumDepth">The absolute storage bound; defaults to <see cref="DefaultDepthAllowed"/>.</param>
+    /// <returns>The deepest declared relationship count, between zero and <paramref name="maximumDepth"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="type"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maximumDepth"/> is less than one.</exception>
+    public static int GetComplexPropertyDepth(Type type, int maximumDepth = DefaultDepthAllowed)
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumDepth, 1);
+
+        // A collectible type may unload as soon as its plugin is released. A Type value roots
+        // its AssemblyLoadContext, so a cached key or value would keep the whole plugin alive.
+        // Measure a collectible root against a transient index over every loaded assembly, so a
+        // hierarchy split across several plugin assemblies is measured as one set; the index is
+        // dropped as soon as this call returns.
+        // A constructed generic can be collectible through an argument even when its defining
+        // assembly is not collectible.
+        if (type.IsCollectible)
+        {
+            var transientScope = DerivedTypeScope.ForAllLoadedAssemblies();
+            return MeasureDeclaredAndDerivedDepth(
+                type,
+                0,
+                maximumDepth,
+                new HashSet<Type>(),
+                transientScope);
+        }
+
+        return ComplexPropertyDepths.GetOrAdd((type, maximumDepth), static key =>
+        {
+            // A non-collectible base can still be extended by a collectible plugin type. The
+            // shared index excludes collectible assemblies, so combine it with a transient scan of
+            // the loaded plugin assemblies for the duration of this measurement. The transient map
+            // is dropped with the scope; only the resulting integer reaches the cache.
+            var scope = DerivedTypeScope.ForCurrentProcess();
+            var path = new HashSet<Type>();
+            return MeasureDeclaredAndDerivedDepth(key.Type, 0, key.MaximumDepth, path, scope);
+        });
+    }
+
+    internal static void ClearComplexPropertyDepthCache()
+    {
+        ComplexPropertyDepths.Clear();
+        Volatile.Write(ref derivedTypesByBase, null);
+    }
+
+    private static int MeasureComplexPropertyDepth(
+        Type type,
+        int depth,
+        int maximumDepth,
+        HashSet<Type> path,
+        DerivedTypeScope scope)
+    {
+        var effectiveType = GetCollectionElementType(type) ?? type;
+        if (!path.Add(effectiveType))
+        {
+            return maximumDepth;
+        }
+
+        var measured = depth;
+        foreach (var property in GetComplexProperties(effectiveType))
+        {
+            var childType = GetCollectionElementType(property.PropertyType) ?? property.PropertyType;
+            var childDepth = depth + 1;
+            measured = Math.Max(
+                measured,
+                childDepth >= maximumDepth
+                    ? maximumDepth
+                    : MeasureDeclaredAndDerivedDepth(childType, childDepth, maximumDepth, path, scope));
+        }
+
+        path.Remove(effectiveType);
+        return measured;
+    }
+
+    /// <summary>
+    /// Measures the declared property type and, for a non-sealed type, every concrete derived type
+    /// whose properties can be materialized from an instance stored as the declared type.
+    /// </summary>
+    private static int MeasureDeclaredAndDerivedDepth(
+        Type type,
+        int depth,
+        int maximumDepth,
+        HashSet<Type> path,
+        DerivedTypeScope scope)
+    {
+        var effectiveType = GetCollectionElementType(type) ?? type;
+        var measured = MeasureComplexPropertyDepth(effectiveType, depth, maximumDepth, path, scope);
+        if (effectiveType.IsSealed || effectiveType.IsValueType)
+        {
+            return measured;
+        }
+
+        foreach (var derivedType in scope.GetDerivedTypes(effectiveType))
+        {
+            measured = Math.Max(
+                measured,
+                MeasureComplexPropertyDepth(derivedType, depth, maximumDepth, path, scope));
+        }
+
+        return measured;
+    }
+
+    /// <summary>
+    /// A per-measurement view of the derived types that are currently loaded.
+    /// </summary>
+    /// <remarks>
+    /// The shared index is reused for non-collectible types so the common path stays amortized. A
+    /// collectible plugin hierarchy cannot live in that index, because a <see cref="Type"/> value
+    /// roots its <see cref="System.Runtime.Loader.AssemblyLoadContext"/>. The scope therefore
+    /// builds every plugin hierarchy into transient maps that are dropped with the scope when the
+    /// top-level measurement returns. Only those maps live for the duration of one call; nothing
+    /// is retained statically.
+    /// </remarks>
+    private sealed class DerivedTypeScope
+    {
+        private readonly Assembly[] assemblies;
+        private readonly Assembly[] collectibleAssemblies;
+        private readonly bool allAssemblies;
+        private IReadOnlyDictionary<Type, Type[]>? collectibleIndex;
+        private IReadOnlyDictionary<Type, Type[]>? allAssembliesIndex;
+        private IReadOnlyDictionary<Type, Type[]>? sharedIndex;
+
+        private DerivedTypeScope(Assembly[] assemblies, bool allAssemblies)
+        {
+            this.assemblies = assemblies;
+            this.allAssemblies = allAssemblies;
+            collectibleAssemblies = allAssemblies
+                ? []
+                : assemblies.Where(assembly => assembly.IsCollectible).ToArray();
+        }
+
+        public static DerivedTypeScope ForCurrentProcess() =>
+            new(AppDomain.CurrentDomain.GetAssemblies(), allAssemblies: false);
+
+        public static DerivedTypeScope ForAllLoadedAssemblies() =>
+            new(AppDomain.CurrentDomain.GetAssemblies(), allAssemblies: true);
+
+        public Type[] GetDerivedTypes(Type type)
+        {
+            // A collectible root must be measured against every loaded assembly: its derived type
+            // can live in another collectible plugin assembly. The all-assembly map is transient
+            // and shared by every step of this one measurement.
+            if (allAssemblies || type.Assembly.IsCollectible)
+            {
+                var transient = allAssembliesIndex ??=
+                    BuildDerivedTypeIndex(assemblies, includeCollectibleAssemblies: true);
+                return Lookup(transient, type);
+            }
+
+            sharedIndex ??= GetDerivedTypeIndex();
+            var sharedTypes = Lookup(sharedIndex, type);
+            if (collectibleAssemblies.Length == 0)
+            {
+                return sharedTypes;
+            }
+
+            // A non-collectible base can be extended by a plugin type. Scan only the collectible
+            // assemblies for the plugin half; the shared index already covers the rest.
+            collectibleIndex ??= BuildDerivedTypeIndex(
+                collectibleAssemblies,
+                includeCollectibleAssemblies: true);
+            return Merge(sharedTypes, Lookup(collectibleIndex, type));
+        }
+
+        private static Type[] Lookup(IReadOnlyDictionary<Type, Type[]> index, Type type) =>
+            index.TryGetValue(type, out var derivedTypes) ? derivedTypes : [];
+
+        private static Type[] Merge(Type[] sharedTypes, Type[] pluginTypes)
+        {
+            if (pluginTypes.Length == 0)
+            {
+                return sharedTypes;
+            }
+
+            if (sharedTypes.Length == 0)
+            {
+                return pluginTypes;
+            }
+
+            var merged = new Type[sharedTypes.Length + pluginTypes.Length];
+            sharedTypes.CopyTo(merged, 0);
+            pluginTypes.CopyTo(merged, sharedTypes.Length);
+            return merged;
+        }
+    }
+
+    /// <summary>
+    /// Builds one derived-type map per assembly generation. A per-type all-assembly scan makes the
+    /// first query for each non-sealed type pay for every loaded assembly; a single pass amortizes
+    /// that cost across all types and keeps the lookup O(1).
+    /// </summary>
+    /// <remarks>
+    /// Collectible assemblies are excluded from the shared map. A <see cref="Type"/> value roots
+    /// its <see cref="System.Runtime.Loader.AssemblyLoadContext"/>, so indexing a plugin type would
+    /// defeat the weak assembly snapshot and prevent the plugin from unloading.
+    /// </remarks>
+    private static IReadOnlyDictionary<Type, Type[]> GetDerivedTypeIndex()
+    {
+        var index = Volatile.Read(ref derivedTypesByBase);
+        if (index is not null)
+        {
+            return index;
+        }
+
+        lock (DerivedTypeIndexLock)
+        {
+            index = Volatile.Read(ref derivedTypesByBase);
+            if (index is not null)
+            {
+                return index;
+            }
+
+            // Snapshot the assembly identity set used for the build. A load or unload that
+            // happens while the index is built leaves an identity-set mismatch, so the next
+            // plan-time check rebuilds instead of keeping an index that predates the type set.
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            index = BuildDerivedTypeIndex(assemblies);
+            Volatile.Write(ref derivedTypesByBase, index);
+            Interlocked.Increment(ref derivedTypeIndexBuildCount);
+            Volatile.Write(ref derivedTypeIndexAssemblies, SnapshotAssemblies(assemblies));
+            return index;
+        }
+    }
+
+    private static Dictionary<Type, Type[]> BuildDerivedTypeIndex(
+        Assembly[] assemblies,
+        bool includeCollectibleAssemblies = false)
+    {
+        var byBase = new Dictionary<Type, List<Type>>();
+
+        foreach (var assembly in assemblies)
+        {
+            if (!includeCollectibleAssemblies && assembly.IsCollectible)
+            {
+                continue;
+            }
+
+            Type?[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException exception)
+            {
+                types = exception.Types;
+            }
+            catch (Exception exception) when (IsReflectionFailure(exception))
+            {
+                continue;
+            }
+
+            foreach (var candidate in types)
+            {
+                if (candidate is null ||
+                    candidate.IsAbstract ||
+                    candidate.IsInterface ||
+                    candidate.ContainsGenericParameters)
+                {
+                    continue;
+                }
+
+                Type[] interfaces;
+                try
+                {
+                    interfaces = candidate.GetInterfaces();
+                }
+                catch (Exception exception) when (IsReflectionFailure(exception))
+                {
+                    // A collectible, plugin, or partially loadable type cannot participate in a
+                    // hydration hierarchy; skip it instead of failing the whole index build.
+                    continue;
+                }
+
+                for (var baseType = candidate.BaseType;
+                     baseType is not null && baseType != typeof(object);
+                     baseType = baseType.BaseType)
+                {
+                    AddCandidate(byBase, baseType, candidate);
+                }
+
+                foreach (var interfaceType in interfaces)
+                {
+                    AddCandidate(byBase, interfaceType, candidate);
+                }
+            }
+        }
+
+        return byBase
+            .Where(pair => includeCollectibleAssemblies || !pair.Key.Assembly.IsCollectible)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.Distinct().OrderBy(type => type.FullName, StringComparer.Ordinal).ToArray());
+    }
+
+    private static bool IsReflectionFailure(Exception exception) =>
+        exception is NotSupportedException or FileNotFoundException or FileLoadException or
+        BadImageFormatException or TypeLoadException;
+
+    private static void AddCandidate(Dictionary<Type, List<Type>> byBase, Type baseType, Type candidate)
+    {
+        try
+        {
+            if (baseType.IsAssignableFrom(candidate))
+            {
+                if (!byBase.TryGetValue(baseType, out var candidates))
+                {
+                    candidates = [];
+                    byBase.Add(baseType, candidates);
+                }
+
+                candidates.Add(candidate);
+            }
+        }
+        catch (ArgumentException)
+        {
+            // Some dynamic or collectible types cannot be compared; they cannot participate in a
+            // hydration hierarchy either.
+        }
+    }
 
     /// <summary>
     /// Gets the simple and complex properties of an object.

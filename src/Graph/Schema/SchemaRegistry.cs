@@ -33,6 +33,11 @@ public class SchemaRegistry : IDisposable
     private readonly ConcurrentQueue<PartialScanDiagnostic> _pendingPartialScanDiagnostics = new();
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private readonly Action<Assembly, IReadOnlyList<Exception>> _partialScanDiagnostic;
+    private readonly object _indexGate = new();
+    private PropertyIndexDefinition[] _propertyIndexes = [];
+    private PropertyAggregateDefinition[] _propertyAggregates = [];
+    private GraphIndexCatalog _indexCatalog = GraphIndexCatalog.Empty;
+    private long _indexCatalogVersion;
     private volatile bool _isInitialized;
     private volatile bool _hasComplexProperties;
 
@@ -65,6 +70,126 @@ public class SchemaRegistry : IDisposable
     /// monotonic while the registry is populated and resets with <see cref="ClearAsync"/>.
     /// </remarks>
     internal bool HasComplexProperties => _hasComplexProperties;
+
+    /// <summary>
+    /// Gets the immutable snapshot of the property indexes and aggregates registered with this
+    /// registry.
+    /// </summary>
+    /// <remarks>
+    /// Registrations are additive and provider-neutral. The snapshot changes atomically whenever a
+    /// definition is added or the registry is cleared, so a provider can read it without holding a
+    /// lock. A store with no registrations sees <see cref="GraphIndexCatalog.Empty"/> and keeps its
+    /// ordinary behavior.
+    /// </remarks>
+    public GraphIndexCatalog Indexes => Volatile.Read(ref _indexCatalog);
+
+    /// <summary>
+    /// Starts a type-safe property-index or aggregate declaration for a node type.
+    /// </summary>
+    /// <typeparam name="TNode">The node type whose label and stored property names are resolved.</typeparam>
+    /// <returns>A fluent builder that registers declarations on this registry.</returns>
+    /// <remarks>
+    /// The builder resolves the label from <see cref="NodeAttribute"/> (or the type-name fallback)
+    /// and the stored property name from <see cref="PropertyAttribute.Label"/> using the same schema
+    /// metadata as <see cref="AddPropertyIndex(PropertyIndexDefinition)"/> and
+    /// <see cref="AddPropertyAggregate(PropertyAggregateDefinition)"/>. It only adds declarations;
+    /// call <see cref="IGraphIndexMaintenance.EnsureIndexesAsync"/> on a provider store to
+    /// materialize them.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// var registry = new SchemaRegistry();
+    /// registry.Node&lt;Contract&gt;()
+    ///     .AddPropertyIndex(contract =&gt; contract.Status)
+    ///     .AddPropertyIndex(contract =&gt; contract.Name, PropertyIndexKind.Ordering)
+    ///     .AddPropertyAggregate(
+    ///         contract =&gt; contract.Status,
+    ///         contract =&gt; contract.Amount,
+    ///         AggregateFunction.Count | AggregateFunction.Average);
+    /// </code>
+    /// </example>
+    public NodeIndexBuilder<TNode> Node<TNode>()
+        where TNode : INode => new(this);
+
+    /// <summary>Registers a provider-neutral property index declaration.</summary>
+    /// <param name="definition">The declaration to add.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="definition"/> is <see langword="null"/>.</exception>
+    /// <exception cref="GraphException">The same label, property, and kind are already registered.</exception>
+    /// <remarks>
+    /// Registering a definition does not create provider storage. Call
+    /// <see cref="IGraphIndexMaintenance.EnsureIndexesAsync"/> on a provider store that implements
+    /// <see cref="IGraphIndexMaintenance"/> to materialize it.
+    /// </remarks>
+    public void AddPropertyIndex(PropertyIndexDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        lock (_indexGate)
+        {
+            if (_propertyIndexes.Any(existing =>
+                    string.Equals(existing.Label, definition.Label, StringComparison.Ordinal) &&
+                    string.Equals(existing.PropertyName, definition.PropertyName, StringComparison.Ordinal) &&
+                    existing.Kind == definition.Kind))
+            {
+                throw new GraphException(
+                    $"A property index for label '{definition.Label}', property " +
+                    $"'{definition.PropertyName}', kind '{definition.Kind}' is already registered.");
+            }
+
+            _propertyIndexes = [.. _propertyIndexes, definition];
+            RebuildIndexCatalog();
+        }
+    }
+
+    /// <summary>Registers a provider-neutral aggregate declaration.</summary>
+    /// <param name="definition">The declaration to add.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="definition"/> is <see langword="null"/>.</exception>
+    /// <exception cref="GraphException">
+    /// The same label, group key, and value property are already registered.
+    /// </exception>
+    /// <remarks>
+    /// Registering a definition does not create provider storage. Call
+    /// <see cref="IGraphIndexMaintenance.EnsureIndexesAsync"/> on a provider store that implements
+    /// <see cref="IGraphIndexMaintenance"/> to materialize it. A typed declaration for a known node
+    /// type is available through <see cref="Node{TNode}"/> and
+    /// <see cref="NodeIndexBuilder{TNode}.AddPropertyAggregate{TGroupKey, TValue}"/>; this overload
+    /// remains the advanced API for dynamically composed declarations.
+    /// </remarks>
+    public void AddPropertyAggregate(PropertyAggregateDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        lock (_indexGate)
+        {
+            var existingIndex = Array.FindIndex(
+                _propertyAggregates,
+                existing =>
+                    string.Equals(existing.Label, definition.Label, StringComparison.Ordinal) &&
+                    string.Equals(existing.GroupKeyProperty, definition.GroupKeyProperty, StringComparison.Ordinal) &&
+                    string.Equals(existing.ValueProperty, definition.ValueProperty, StringComparison.Ordinal));
+            if (existingIndex >= 0)
+            {
+                // Functions are additive: a later registration may widen the maintained set without
+                // forcing a ClearAsync of every other declaration.
+                var merged = _propertyAggregates[existingIndex].Functions | definition.Functions;
+                if (merged == _propertyAggregates[existingIndex].Functions)
+                {
+                    return;
+                }
+
+                var updated = _propertyAggregates.ToArray();
+                updated[existingIndex] = new PropertyAggregateDefinition(
+                    definition.Label,
+                    definition.GroupKeyProperty,
+                    definition.ValueProperty,
+                    merged);
+                _propertyAggregates = updated;
+                RebuildIndexCatalog();
+                return;
+            }
+
+            _propertyAggregates = [.. _propertyAggregates, definition];
+            RebuildIndexCatalog();
+        }
+    }
 
     /// <summary>
     /// Asynchronously initializes the schema registry by discovering all INode and IRelationship types
@@ -335,6 +460,13 @@ public class SchemaRegistry : IDisposable
             _nodeSchemas.Clear();
             _relationshipSchemas.Clear();
             _scannedAssemblies.Clear();
+            lock (_indexGate)
+            {
+                _propertyIndexes = [];
+                _propertyAggregates = [];
+                RebuildIndexCatalog();
+            }
+
             _isInitialized = false;
             _hasComplexProperties = false;
         }
@@ -349,6 +481,13 @@ public class SchemaRegistry : IDisposable
         // All callers hold _semaphore so discovery and the initialized flag publish atomically.
         RegisterGraphEntityTypes(AppDomain.CurrentDomain.GetAssemblies());
         _isInitialized = true;
+    }
+
+    /// <summary>Rebuilds and publishes the immutable catalog. The caller holds <see cref="_indexGate"/>.</summary>
+    private void RebuildIndexCatalog()
+    {
+        var version = ++_indexCatalogVersion;
+        Volatile.Write(ref _indexCatalog, new GraphIndexCatalog(_propertyIndexes, _propertyAggregates, version));
     }
 
     private void TrackComplexProperties(Type entityType)
@@ -440,6 +579,26 @@ public class SchemaRegistry : IDisposable
         }
 
         return type;
+    }
+
+    /// <summary>
+    /// Resolves the schema metadata for one entity type without requiring the registry to be
+    /// initialized. This is the same resolution the registration path uses, including property
+    /// mapping and collision validation.
+    /// </summary>
+    internal static EntitySchemaInfo DescribeEntity(Type entityType)
+    {
+        ArgumentNullException.ThrowIfNull(entityType);
+        var collisions = new List<string>();
+        var schema = CreateEntitySchemaInfo(entityType, GetLabelFromType(entityType), collisions);
+        if (collisions.Count > 0)
+        {
+            throw new GraphException(
+                $"Duplicate property label(s) detected on '{entityType.FullName}':{Environment.NewLine}" +
+                string.Join(Environment.NewLine, collisions.Select(c => $"  - {c}")));
+        }
+
+        return schema;
     }
 
     private static EntitySchemaInfo CreateEntitySchemaInfo(Type entityType, string label, List<string> collisions)

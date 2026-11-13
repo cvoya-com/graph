@@ -102,8 +102,14 @@ internal sealed class AgeLabelPatternPass : ICypherPass
                             match,
                             aliasGenerator,
                             expansionTarget?.Alias,
-                            out var predicates);
+                            out var predicates,
+                            out var patternChanged);
                         output.Add(rewritten);
+                        if (patternChanged)
+                        {
+                            changed = true;
+                        }
+
                         if (predicates.Count == 0)
                         {
                             continue;
@@ -249,7 +255,8 @@ internal sealed class AgeLabelPatternPass : ICypherPass
         MatchClause match,
         AliasGenerator aliasGenerator,
         string? expansionTargetAlias,
-        out List<CypherExpression> predicates)
+        out List<CypherExpression> predicates,
+        out bool labelChanged)
     {
         var nodePredicates = new List<CypherExpression>();
         var relationshipPredicates = new List<CypherExpression>();
@@ -372,6 +379,7 @@ internal sealed class AgeLabelPatternPass : ICypherPass
 
         // Keep node predicates before relationship predicates so rendering remains stable.
         predicates = [.. nodePredicates, .. relationshipPredicates];
+        labelChanged = changed;
         return changed ? new MatchClause(patterns, match.Optional) : match;
     }
 

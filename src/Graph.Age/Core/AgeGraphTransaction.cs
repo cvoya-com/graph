@@ -131,7 +131,11 @@ internal sealed class AgeGraphTransaction : IGraphTransaction
                 transaction,
                 context.LoggerFactory,
                 context.Store.BatchExecutionObserver,
-                context.Store.BatchCommandTransform);
+                context.Store.BatchCommandTransform,
+                context.Store.IndexesProvisioned,
+                context.Store.IndexCatalog,
+                context.Store.IndexPresenceCache,
+                context.Store.ProvisionedCatalogVersion);
         }
         catch
         {

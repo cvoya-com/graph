@@ -19,15 +19,22 @@ using Npgsql.Age;
 /// created from an existing data source leaves that data source under caller ownership. AGE is
 /// loaded and its search path configured whenever a provider connection is opened.
 /// </remarks>
-public sealed class AgeGraphStore : IAsyncDisposable
+public sealed class AgeGraphStore : IAsyncDisposable, IGraphIndexMaintenance
 {
     private readonly NpgsqlDataSource dataSource;
     private readonly bool ownsDataSource;
+    private readonly SchemaRegistry schemaRegistry;
     private readonly AgeGraphStoreOptions options;
     private readonly SemaphoreSlim provisioningGate = new(1, 1);
     private readonly SemaphoreSlim capabilitiesGate = new(1, 1);
     private int disposed;
     private volatile bool graphReady;
+    private volatile bool indexesProvisioned;
+    private long provisionedCatalogVersion;
+    private AgeIndexPresenceCache indexPresenceCache = new();
+    private bool indexPresenceCacheEnabled = true;
+    private TimeSpan indexPresenceCacheTtl = TimeSpan.FromSeconds(5);
+    private int nativeIdInPredicateProbeCount;
     private AgeDialect? dialect;
     private volatile AgeServerCapabilities? serverCapabilities;
 
@@ -77,7 +84,8 @@ public sealed class AgeGraphStore : IAsyncDisposable
         this.options = options ?? new AgeGraphStoreOptions();
         GraphName = ResolveGraphName(graphName);
         LoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
-        Graph = new AgeGraph(this, GraphName, schemaRegistry ?? new SchemaRegistry(), LoggerFactory);
+        this.schemaRegistry = schemaRegistry ?? new SchemaRegistry();
+        Graph = new AgeGraph(this, GraphName, this.schemaRegistry, LoggerFactory);
     }
 
     /// <summary>Initializes a store from an externally owned AGE-enabled data source.</summary>
@@ -131,7 +139,8 @@ public sealed class AgeGraphStore : IAsyncDisposable
         LoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         BatchExecutionObserver = batchExecutionObserver;
         BatchCommandTransform = batchCommandTransform;
-        Graph = new AgeGraph(this, GraphName, schemaRegistry ?? new SchemaRegistry(), LoggerFactory);
+        this.schemaRegistry = schemaRegistry ?? new SchemaRegistry();
+        Graph = new AgeGraph(this, GraphName, this.schemaRegistry, LoggerFactory);
     }
 
     /// <summary>Gets the graph abstraction for this store.</summary>
@@ -153,7 +162,54 @@ public sealed class AgeGraphStore : IAsyncDisposable
         AgeLabelHierarchyValidationMode.Warn;
 
     /// <summary>
-    /// Registers a runtime node-label hierarchy for a derived label that has no CLR type
+    /// Gets or sets whether this store caches positive declared-index presence answers.
+    /// </summary>
+    /// <remarks>
+    /// The default is <see langword="true"/>. The cache is per store and per process; it never
+    /// stores negative answers, so another process's <c>EnsureIndexesAsync</c> is observed by the
+    /// next write. A stale positive answer can survive another process's drop for at most
+    /// <see cref="IndexPresenceCacheTtl"/>.
+    /// <para>
+    /// Set this property before the first graph operation on the store, together with
+    /// <see cref="IndexPresenceCacheTtl"/>. Disable it when an instance must observe every
+    /// cross-process DDL change immediately; each plan and write then probes
+    /// <c>information_schema</c>.
+    /// </para>
+    /// </remarks>
+    public bool IndexPresenceCacheEnabled
+    {
+        get => indexPresenceCacheEnabled;
+        set
+        {
+            indexPresenceCacheEnabled = value;
+            indexPresenceCache.Configure(value, indexPresenceCacheTtl);
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets how long a positive declared-index presence answer stays valid.
+    /// </summary>
+    /// <remarks>
+    /// The default is five seconds. The value must be greater than zero and no greater than 365
+    /// days; disable the cache instead of setting a zero, negative, or larger TTL. The TTL bounds
+    /// only the stale-positive window because negative answers are never cached. Set this property
+    /// before the first graph operation on the store, together with
+    /// <see cref="IndexPresenceCacheEnabled"/>.
+    /// </remarks>
+    public TimeSpan IndexPresenceCacheTtl
+    {
+        get => indexPresenceCacheTtl;
+        set
+        {
+            AgeIndexPresenceCache.ValidateTtl(value);
+            indexPresenceCacheTtl = value;
+            indexPresenceCache.Configure(indexPresenceCacheEnabled, value);
+        }
+    }
+
+    /// <summary>
+    /// Registers a runtime node-label hierarchy for a derived label that has no CLR type, such as
+    /// a type materialized from a Nulex <c>FormConfig</c> as <see cref="Cvoya.Graph.DynamicNode"/>.
     /// </summary>
     /// <param name="parentLabel">The label of the base logical type.</param>
     /// <param name="childLabel">The label of the derived logical type.</param>
@@ -219,6 +275,93 @@ public sealed class AgeGraphStore : IAsyncDisposable
         await CreateGraphIfNotExistsAsync(connection, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Creates or refreshes every provider structure declared by the store's
+    /// <see cref="SchemaRegistry"/> and backfills existing rows.
+    /// </summary>
+    /// <param name="cancellationToken">A token that cancels the operation.</param>
+    /// <returns>A report describing the structures created and rows backfilled.</returns>
+    /// <remarks>
+    /// The operation is safe to run repeatedly. It holds the graph provisioning lock for the whole
+    /// transaction, so it serializes with a concurrent <c>create_vlabel</c>. While indexes are
+    /// provisioned on this store, a label the provider creates later receives its structures in the
+    /// creating transaction. A second store must call this method again (or rely on the per-query
+    /// relation probe) after an external maintenance call. A store with no registered definitions
+    /// performs no work.
+    /// </remarks>
+    public async Task<GraphIndexMaintenanceReport> EnsureIndexesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        var catalog = IndexCatalog;
+        if (catalog.IsEmpty)
+        {
+            return new GraphIndexMaintenanceReport(GraphName, 0, 0, 0, 0);
+        }
+
+        var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connectionLease = connection.ConfigureAwait(false);
+        await CreateGraphIfNotExistsAsync(connection, cancellationToken).ConfigureAwait(false);
+        var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transactionLease = transaction.ConfigureAwait(false);
+        await AgeProvisioningLock
+            .AcquireAsync(connection, transaction, GraphName, cancellationToken)
+            .ConfigureAwait(false);
+        var result = await AgeIndexMaintenance
+            .EnsureAsync(connection, transaction, GraphName, catalog, cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        indexesProvisioned = true;
+        Volatile.Write(ref provisionedCatalogVersion, catalog.Version);
+        indexPresenceCache.Clear();
+        LoggerFactory.CreateLogger<AgeGraphStore>().LogInformationIndexesEnsured(
+            GraphName,
+            result.DefinitionsInspected,
+            result.StructuresCreated,
+            result.RowsBackfilled);
+        return result;
+    }
+
+    /// <summary>Removes every provider structure created by <see cref="EnsureIndexesAsync"/>.</summary>
+    /// <param name="cancellationToken">A token that cancels the operation.</param>
+    /// <returns>A report describing the structures removed.</returns>
+    /// <remarks>
+    /// The operation is safe to run repeatedly and leaves ordinary AGE reads and writes untouched.
+    /// Queries that were eligible for a physical plan fall back to the AGE Cypher path as soon as
+    /// the per-query relation probe observes the missing structures.
+    /// </remarks>
+    public async Task<GraphIndexMaintenanceReport> DropIndexesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        var catalog = IndexCatalog;
+        var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connectionLease = connection.ConfigureAwait(false);
+        var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transactionLease = transaction.ConfigureAwait(false);
+        if (!await GraphExistsAsync(connection, transaction, cancellationToken).ConfigureAwait(false))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new GraphIndexMaintenanceReport(GraphName, 0, 0, 0, 0);
+        }
+
+        await AgeProvisioningLock
+            .AcquireAsync(connection, transaction, GraphName, cancellationToken)
+            .ConfigureAwait(false);
+        var result = await AgeIndexMaintenance
+            .DropAsync(connection, transaction, GraphName, catalog, cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        indexesProvisioned = false;
+        Volatile.Write(ref provisionedCatalogVersion, 0);
+        indexPresenceCache.Clear();
+        LoggerFactory.CreateLogger<AgeGraphStore>().LogInformationIndexesDropped(
+            GraphName,
+            result.DefinitionsInspected,
+            result.StructuresRemoved);
+        return result;
+    }
+
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
@@ -250,7 +393,7 @@ public sealed class AgeGraphStore : IAsyncDisposable
     /// Gets the dialect for the connected AGE server. The installed extension version is detected
     /// once on the first connection and cached on this store.
     /// </summary>
-    internal AgeDialect Dialect => Volatile.Read(ref dialect) ?? AgeDialect.ForServer(ServerCapabilities);
+    internal AgeDialect Dialect => Volatile.Read(ref dialect) ?? AgeDialect.Instance;
 
     /// <summary>Gets the capabilities of the connected AGE server.</summary>
     internal CapabilitySet Capabilities => Dialect.Capabilities;
@@ -293,6 +436,21 @@ public sealed class AgeGraphStore : IAsyncDisposable
     internal Func<AgeBatchCommand, AgeBatchCommand>? BatchCommandTransform { get; }
 
     /// <summary>
+    /// Whether this store should provision declared structures for a label it creates.
+    /// Set by <see cref="EnsureIndexesAsync"/> and cleared by <see cref="DropIndexesAsync"/>.
+    /// </summary>
+    internal bool IndexesProvisioned => indexesProvisioned;
+
+    /// <summary>Gets the catalog version this store last provisioned, or zero when it never ran maintenance.</summary>
+    internal long ProvisionedCatalogVersion => Volatile.Read(ref provisionedCatalogVersion);
+
+    /// <summary>Gets the AGE-resolved snapshot of the registry declarations for this transaction.</summary>
+    internal AgeIndexCatalog IndexCatalog => AgeIndexCatalog.From(schemaRegistry);
+
+    /// <summary>Gets the per-store availability cache shared by every transaction runner.</summary>
+    internal AgeIndexPresenceCache IndexPresenceCache => indexPresenceCache;
+
+    /// <summary>
     /// Test instrumentation invoked once per execution of the graph-creation sequence, including
     /// attempts that go on to fail. It deliberately stays internal so counting provisioning runs does
     /// not expand the public API.
@@ -306,6 +464,18 @@ public sealed class AgeGraphStore : IAsyncDisposable
     /// finished and taking the graph-ready fast path - which would leave the test passing vacuously.
     /// </summary>
     internal Action? ProvisioningGateObserver { get; set; }
+
+    /// <summary>
+    /// Gets whether the connected AGE extension supports <c>id(alias) IN &lt;agtype list&gt;</c>.
+    /// AGE 1.7 does; AGE 1.8 segfaults or rejects the right operand. The value stays
+    /// <see langword="false"/> until the extension version has been observed, so an unknown server
+    /// always receives the portable lowering.
+    /// </summary>
+    internal bool SupportsNativeIdInPredicates =>
+        serverCapabilities is { } detected && detected.Version < AgeDialect.MinimumNativeShortestPathVersion;
+
+    /// <summary>Gets the number of extension-version detection attempts (test seam).</summary>
+    internal int NativeIdInPredicateProbeCount => Volatile.Read(ref nativeIdInPredicateProbeCount);
 
     internal async Task<NpgsqlConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -573,9 +743,17 @@ public sealed class AgeGraphStore : IAsyncDisposable
         {
             if (serverCapabilities is null)
             {
+                Interlocked.Increment(ref nativeIdInPredicateProbeCount);
                 var detected = await AgeServerCapabilityDetector
                     .DetectAsync(connection, options, cancellationToken)
                     .ConfigureAwait(false);
+                if (detected is null)
+                {
+                    // An externally owned source may be opened before deployment installs AGE.
+                    // Leave detection unknown so a later connection can observe that installation.
+                    return;
+                }
+
                 var detectedDialect = AgeDialect.ForServer(detected);
                 Interlocked.CompareExchange(ref dialect, detectedDialect, null);
                 serverCapabilities = detected;

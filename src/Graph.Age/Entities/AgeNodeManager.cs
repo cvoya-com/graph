@@ -8,6 +8,7 @@ using Cvoya.Graph.Age.Core;
 using Cvoya.Graph.Age.Querying;
 using Cvoya.Graph.Age.Querying.Cypher;
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
+using Cvoya.Graph.Age.Schema;
 using Cvoya.Graph.Age.Serialization;
 using Cvoya.Graph.Serialization;
 using Microsoft.Extensions.Logging;
@@ -95,8 +96,11 @@ internal sealed class AgeNodeManager(AgeGraphContext context)
 
         var result = await transaction.RunAsync(cypher, parameters, cancellationToken).ConfigureAwait(false);
         var record = await GetSingleRecordAsync(result, cancellationToken).ConfigureAwait(false);
-
-        return record["nodeId"].As<long>();
+        var graphId = record["nodeId"].As<long>();
+        await transaction
+            .WriteIndexAsync(storageLabel, graphId, simpleProperties, cancellationToken)
+            .ConfigureAwait(false);
+        return graphId;
     }
 
     internal static Dictionary<string, object?> BuildNodeProperties(EntityInfo entity)

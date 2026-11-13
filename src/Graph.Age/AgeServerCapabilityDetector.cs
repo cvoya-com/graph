@@ -22,7 +22,7 @@ internal static class AgeServerCapabilityDetector
         "AND " +
         "to_regprocedure('ag_catalog.age_all_shortest_paths(ag_catalog.agtype,ag_catalog.agtype,ag_catalog.agtype,ag_catalog.agtype,ag_catalog.agtype,ag_catalog.agtype,ag_catalog.agtype)') IS NOT NULL";
 
-    public static async Task<AgeServerCapabilities> DetectAsync(
+    public static async Task<AgeServerCapabilities?> DetectAsync(
         NpgsqlConnection connection,
         AgeGraphStoreOptions options,
         CancellationToken cancellationToken)
@@ -31,6 +31,11 @@ internal static class AgeServerCapabilityDetector
         ArgumentNullException.ThrowIfNull(options);
 
         var version = await ReadVersionAsync(connection, cancellationToken).ConfigureAwait(false);
+        if (version is null)
+        {
+            return null;
+        }
+
         var supportsVersionedFeatures = version >= NativeShortestPathMinimumVersion;
 
         var features = AgeFeature.None;
@@ -75,7 +80,7 @@ internal static class AgeServerCapabilityDetector
         return new AgeServerCapabilities(version, features);
     }
 
-    private static async Task<Version> ReadVersionAsync(
+    private static async Task<Version?> ReadVersionAsync(
         NpgsqlConnection connection,
         CancellationToken cancellationToken)
     {
@@ -86,8 +91,7 @@ internal static class AgeServerCapabilityDetector
         var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         if (value is not string text || string.IsNullOrWhiteSpace(text))
         {
-            throw new GraphException(
-                "The connected PostgreSQL database does not have the Apache AGE extension installed.");
+            return null;
         }
 
         if (!Version.TryParse(text, out var version))

@@ -50,7 +50,7 @@ if [ "$SHOW_HELP" = true ]; then
 fi
 
 # Ensure we're in the right directory
-PROJECT_DIR="tests/Graph.Performance.Tests"
+PROJECT_DIR="tests/Graph.Neo4j.Performance.Tests"
 if [ ! -d "$PROJECT_DIR" ]; then
     echo "Error: Performance test project not found. Make sure you're running from the repository root."
     exit 1

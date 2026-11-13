@@ -3,6 +3,7 @@
 
 namespace Cvoya.Graph.Age.Querying.Cypher;
 
+using Cvoya.Graph.Age.Querying.Cypher.Execution;
 using Cvoya.Graph.Cypher.Ast;
 
 /// <summary>
@@ -26,13 +27,19 @@ using Cvoya.Graph.Cypher.Ast;
 /// <c>Count()</c>/<c>LongCount()</c> expects. The branches are disjoint because an AGE vertex is
 /// stored in exactly one label table.
 /// </param>
+/// <param name="Plan">
+/// An optional provider execution plan that travels beside the rendered text. It is never encoded
+/// into <paramref name="Text"/>; the runner ignores it when the required physical relations are
+/// absent.
+/// </param>
 internal sealed record CypherQuery(
     string Text,
     IReadOnlyDictionary<string, object?> Parameters,
     (Type Source, Type Relationship, Type Target)? GraphPathTypes = null,
     IReadOnlyList<string>? ProjectionColumns = null,
     CypherPostProcessing? PostProcessing = null,
-    bool SumUnionCountBranches = false)
+    bool SumUnionCountBranches = false,
+    AgeExecutionPlan? Plan = null)
 {
     /// <summary>
     /// Creates an empty query.

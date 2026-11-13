@@ -344,7 +344,7 @@ should_run_project() {
     matches_project_selector "$project" || return 1
 
     case "$project_name" in
-        Graph.Performance.Tests.csproj)
+        Graph.Performance.Tests.Shared.csproj|Graph.Age.Performance.Tests.csproj|Graph.Neo4j.Performance.Tests.csproj)
             return 1
             ;;
         Graph.Analyzers.Tests.csproj)
