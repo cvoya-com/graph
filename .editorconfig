@@ -69,7 +69,7 @@ dotnet_diagnostic.CA1001.severity = none
 
 # BenchmarkDotNet invokes GlobalCleanup, which asynchronously disposes each benchmark's graph
 # store; implementing IDisposable would create a second, unused cleanup path.
-[tests/Graph.Performance.Tests/*Benchmark.cs]
+[tests/Graph.Neo4j.Performance.Tests/*Benchmark.cs]
 dotnet_diagnostic.CA1001.severity = none
 
 # This xUnit collection type follows the framework's discovery naming convention.

@@ -8,6 +8,7 @@ using Cvoya.Graph.Age.Querying.Cypher;
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
 using Cvoya.Graph.Age.Querying.Cypher.Lowering;
 using Cvoya.Graph.Age.Querying.Cypher.Visitors.Core;
+using Cvoya.Graph.Age.Schema;
 using Cvoya.Graph.Cypher;
 using Cvoya.Graph.Cypher.Ast;
 using Cvoya.Graph.Cypher.Ast.Expressions;
@@ -198,6 +199,72 @@ public sealed class AgeUnionAllExpansionTranslationTests
         Assert.Equal(1, translated.Text.Split("UNION ALL", StringSplitOptions.None).Length - 1);
     }
 
+    [Fact]
+    public void DistinctStatusLowersToStatusColumnPlan()
+    {
+        var query = Nodes()
+            .Select(contract => contract.Status)
+            .Distinct();
+
+        var translated = TranslateWithStatusIndex(query.Expression);
+        var sql = BuildSql(translated);
+
+        var plan = Assert.IsType<AgeSqlPlan>(translated.Plan);
+        Assert.Equal("distinct", plan.Kind);
+        Assert.DoesNotContain("RETURN DISTINCT", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("to_jsonb(\"__group\")::text::ag_catalog.agtype", sql, StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY \"__group\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DistinctOnNonStatusPropertyLowersToUnionAllAndSqlDistinct()
+    {
+        var query = Nodes()
+            .Select(contract => contract.Name)
+            .Distinct();
+
+        var translated = Translate(query.Expression);
+        var sql = BuildSql(translated);
+
+        Assert.Contains("UNION ALL", translated.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("RETURN DISTINCT", translated.Text, StringComparison.Ordinal);
+        Assert.StartsWith("SELECT DISTINCT age_result.", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GroupedStatusCountLowersToStatusColumnPlan()
+    {
+        var query = Nodes()
+            .GroupBy(contract => contract.Status)
+            .Select(group => new { group.Key, Count = group.Count() });
+
+        var translated = TranslateWithStatusIndex(query.Expression);
+        var sql = BuildSql(translated);
+
+        var plan = Assert.IsType<AgeSqlPlan>(translated.Plan);
+        Assert.Equal("group", plan.Kind);
+        Assert.Contains("UNION ALL", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("count(*)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sum((age_result.", sql, StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY \"__group\"", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GroupedCountOnNonStatusPropertyLowersToPartialCountsAndSqlCombine()
+    {
+        var query = Nodes()
+            .GroupBy(contract => contract.Name)
+            .Select(group => new { group.Key, Count = group.Count() });
+
+        var translated = Translate(query.Expression);
+        var sql = BuildSql(translated);
+
+        Assert.Contains("count(1) AS __a0", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("UNION ALL", translated.Text, StringComparison.Ordinal);
+        Assert.Contains("sum((age_result.\"Count\")::text::numeric)::text::ag_catalog.agtype AS \"Count\"", sql, StringComparison.Ordinal);
+        Assert.EndsWith("GROUP BY age_result.\"Key\"", sql, StringComparison.Ordinal);
+    }
+
     private static IQueryable<Nul53Contract> Nodes() =>
         new AgeGraphStore(
             "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
@@ -217,6 +284,22 @@ public sealed class AgeUnionAllExpansionTranslationTests
         return visitor.Query;
     }
 
+    private static CypherQuery TranslateWithStatusIndex(System.Linq.Expressions.Expression expression)
+    {
+        var registry = new SchemaRegistry();
+        foreach (var label in new[] { "Nul53Contract", "Nul53Contract_Kauf", "Nul53Contract_Miete" })
+        {
+            registry.AddPropertyIndex(new PropertyIndexDefinition(label, "Status"));
+        }
+
+        var visitor = new CypherQueryVisitor(
+            typeof(Nul53Contract),
+            hasComplexProperties: false,
+            indexCatalog: AgeIndexCatalog.From(registry));
+        visitor.Visit(expression);
+        return visitor.Query;
+    }
+
     private static string BuildSql(CypherQuery query)
     {
         var (cypher, columns, _) = AgeQueryRunner.NormalizeCommandForTesting(
@@ -227,7 +310,8 @@ public sealed class AgeUnionAllExpansionTranslationTests
             cypher,
             columns,
             query.PostProcessing,
-            "$1");
+            "$1",
+            query.Plan);
     }
 }
 

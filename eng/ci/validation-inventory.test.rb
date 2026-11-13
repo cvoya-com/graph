@@ -82,7 +82,7 @@ Dir.chdir(ROOT) do
   release_runs = workflow_steps(release).map { |step| step["run"] }.compact.join("\n")
   release_test_projects = project_references(release_runs, "tests")
   expected_release_tests = repository_projects
-    .select { |path| path.start_with?("tests/") && !path.end_with?("Graph.Performance.Tests.csproj") }
+    .select { |path| path.start_with?("tests/") && !path.include?("Performance.Tests") }
     .to_set
 
   check_inventory("release test-project inventory", expected_release_tests, release_test_projects)

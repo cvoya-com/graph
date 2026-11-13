@@ -54,6 +54,9 @@ internal class AgeGraph : IGraph
 
     public SchemaRegistry SchemaRegistry => _schemaRegistry;
 
+    /// <summary>Gets the owning store for provider-internal query planning and tests.</summary>
+    internal AgeGraphStore Store => _graphStore;
+
     /// <inheritdoc />
     public async Task<IGraphTransaction> GetTransactionAsync(CancellationToken cancellationToken = default)
     {

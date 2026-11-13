@@ -28,6 +28,8 @@ A provider is **compliant** when its compatibility run reports N passed cases / 
 | RelationshipPredicates | Yes / No | |
 | SetOperations | Yes / No | |
 | NullElementsInSimpleCollections | Yes / No | |
+| PropertyIndexes | Yes / No | Optional `IGraphIndexMaintenance`; no packaged TCK surface yet |
+| PropertyAggregateIndexes | Yes / No | Optional `IGraphIndexMaintenance`; no packaged TCK surface yet |
 
 ## Results
 

@@ -35,6 +35,9 @@ internal sealed class AgeGraphContext
 
     public string GraphName => Store.GraphName;
 
+    /// <summary>Gets whether the store's AGE version accepts the native <c>IN</c> id form.</summary>
+    internal bool SupportsNativeIdInPredicates => Store.SupportsNativeIdInPredicates;
+
     public ILoggerFactory? LoggerFactory { get; }
 
     public SchemaRegistry SchemaRegistry { get; }

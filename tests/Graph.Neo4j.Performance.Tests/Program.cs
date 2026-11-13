@@ -3,30 +3,22 @@
 
 namespace Graph.Performance.Tests;
 
-using BenchmarkDotNet.Configs;
-using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
-using BenchmarkDotNet.Toolchains.InProcess.Emit;
 
 public class Program
 {
     /// <summary>
-    /// The main entry point for the performance tests.
+    /// The main entry point for the Neo4j performance tests.
     /// </summary>
     /// <param name="args">Command line arguments.</param>
     public static void Main(string[] args)
     {
-        // Configure for development mode with project references
-        // Use only InProcess toolchain to avoid project reference issues
-        var config = ManualConfig.Create(DefaultConfig.Instance)
-            .AddJob(Job.Default.WithToolchain(InProcessEmitToolchain.Instance))
-            .WithOptions(ConfigOptions.DisableOptimizationsValidator);
+        var config = PerformanceBenchmarkConfig.Create();
 
         // Run all benchmarks automatically (no interactive selection)
         if (args.Length == 0 || args.Contains("--all"))
         {
             Console.WriteLine("Running all benchmarks...");
-            // Run all benchmark classes
             BenchmarkRunner.Run<CrudOperationsBenchmark>(config);
             BenchmarkRunner.Run<RelationshipBenchmark>(config);
         }

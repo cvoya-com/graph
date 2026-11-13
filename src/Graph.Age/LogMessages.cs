@@ -166,4 +166,10 @@ internal static partial class LogMessages
     [LoggerMessage(EventId = 0, Level = LogLevel.Warning, Message = "Runtime label-hierarchy validation could not inspect every physical label; registration gaps may be unreported")]
     internal static partial void LogWarningLabelHierarchyValidationFailed(this ILogger logger, Exception exception);
 
+    [LoggerMessage(EventId = 0, Level = LogLevel.Information, Message = "Declared property indexes ensured on AGE graph '{GraphName}': {Definitions} definitions, {Structures} structures created, {Rows} rows backfilled")]
+    internal static partial void LogInformationIndexesEnsured(this ILogger logger, global::System.String graphName, global::System.Int32 definitions, global::System.Int32 structures, global::System.Int64 rows);
+
+    [LoggerMessage(EventId = 0, Level = LogLevel.Information, Message = "Declared property indexes dropped on AGE graph '{GraphName}': {Definitions} definitions, {Structures} structures removed")]
+    internal static partial void LogInformationIndexesDropped(this ILogger logger, global::System.String graphName, global::System.Int32 definitions, global::System.Int32 structures);
+
 }

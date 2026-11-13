@@ -28,6 +28,8 @@ public sealed class AgeDialect : ICypherDialect
         GraphCapability.RelationshipPredicates,
         GraphCapability.SetOperations,
         GraphCapability.NullElementsInSimpleCollections,
+        GraphCapability.PropertyIndexes,
+        GraphCapability.PropertyAggregateIndexes,
     ];
 
     // Apache AGE 1.8.0 added native age_shortest_path/age_all_shortest_paths. AGE 1.7.0 has
@@ -76,6 +78,7 @@ public sealed class AgeDialect : ICypherDialect
     private readonly CapabilitySet capabilities;
     private readonly bool nativeShortestPath;
     private readonly bool nativePredicateFunctions;
+    private readonly bool nativeIdInPredicates;
 
     /// <summary>Gets the first Apache AGE version that exposes the native shortest-path functions.</summary>
     internal static Version MinimumNativeShortestPathVersion { get; } = new(1, 8, 0);
@@ -90,11 +93,13 @@ public sealed class AgeDialect : ICypherDialect
     private AgeDialect(
         CapabilitySet capabilities,
         bool nativeShortestPath,
-        bool nativePredicateFunctions)
+        bool nativePredicateFunctions,
+        bool nativeIdInPredicates = false)
     {
         this.capabilities = capabilities;
         this.nativeShortestPath = nativeShortestPath;
         this.nativePredicateFunctions = nativePredicateFunctions;
+        this.nativeIdInPredicates = nativeIdInPredicates;
     }
 
     /// <summary>Gets the shared Apache AGE 1.7 dialect instance.</summary>
@@ -136,7 +141,8 @@ public sealed class AgeDialect : ICypherDialect
         return new AgeDialect(
             shortestPath ? NativeSupportedCapabilities : SupportedCapabilities,
             shortestPath,
-            serverCapabilities.SupportsNativePredicateFunctions);
+            serverCapabilities.SupportsNativePredicateFunctions,
+            nativeIdInPredicates: serverCapabilities.Version < MinimumNativeShortestPathVersion);
     }
 
     /// <summary>Parses an AGE <c>extversion</c> string, tolerating suffixes and two-part versions.</summary>
@@ -345,6 +351,11 @@ public sealed class AgeDialect : ICypherDialect
         // NativeElementIdentity is the only item AGE renders as id(...); it is never null.
         if (item.StartsWith("id(", StringComparison.Ordinal))
         {
+            if (nativeIdInPredicates)
+            {
+                return $"({item} IN {collection})";
+            }
+
             // AGE 1.8's any() transform mis-types a graphid comparison inside the predicate
             // ("no relation entry for relid"), so identity membership keeps the list form even on
             // a server that exposes the predicate functions.

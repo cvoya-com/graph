@@ -79,6 +79,27 @@ var allConnections = await graph.Nodes<User>()
     .ToListAsync();
 ```
 
+## Apache AGE performance features
+
+The AGE provider exposes opt-in performance features through `SchemaRegistry` declarations and
+`EnsureIndexesAsync`. Full guides, including the physical tables, scale-out locking, fallback
+behavior, and breaking-change cleanup, live in
+[`src/Graph.Age/docs`](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/README.md):
+
+| Guide | Use it for |
+| --- | --- |
+| [Declared equality indexes](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/01-declared-equality-indexes.md) | Equality, `GROUP BY`, and `DISTINCT` on a string property |
+| [Ordering declarations and paging](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/02-ordering-declarations-and-paging.md) | `OrderBy` + `Skip`/`Take` over a string property |
+| [Declared aggregates](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/03-declared-aggregates.md) | Grouped `Count`/`Sum`/`Min`/`Max`/`Average` |
+| [Complex property hydration](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/04-complex-property-hydration.md) | Auto-loading nested value objects |
+| [Native ID lists and AGE versions](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/05-native-id-lists-and-age-versions.md) | Full-text `Search` and endpoint id lists across AGE 1.7/1.8 |
+| [Collectible plugin types](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/06-collectible-plugin-types.md) | Plugin-provided derived types in a collectible load context |
+| [Index presence cache](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/07-index-presence-cache.md) | Positive-only per-store cache: defaults, tuning, disabling, and the `42P01` window |
+
+Declarations are metadata only. Register them on the registry used to construct `AgeGraphStore`,
+then call `EnsureIndexesAsync` once per graph and declaration snapshot. The provider keeps one
+generalized `<label>__idx` layout for every label, with SHA-256-derived bounded names.
+
 ### Missing-property filters (Apache AGE)
 
 AGE stores a null simple property by omitting its key from the `properties` map. The AGE provider
@@ -91,7 +112,7 @@ create a partial B-tree index on every physical label table that can hold the pr
 
 ```sql
 CREATE INDEX "Kontakt_Person_Notiz_missing_idx"
-ON "qa_r1"."Kontakt_Person" (id)
+ON "<graph>"."Kontakt_Person" (id)
 WHERE NOT (properties ? '"Notiz"'::ag_catalog.agtype);
 ```
 
@@ -109,20 +130,61 @@ keeps the provider-neutral `IS NOT NULL` form for that direction.
 Measured on AGE 1.8.0 / PostgreSQL 18.6 with 180,000 `Kontakt_Person` rows and 54,000 missing
 `Notiz` keys (20 runs, 5 warm-ups, `max_parallel_workers_per_gather=0`):
 
-| Plan | Gate p95 | Result |
-|---|---:|---|
-| previous lowering, `src.Notiz IS NULL` | 59.61 ms | FAIL (> 50 ms) |
-| key-existence lowering, no partial index | 22.79 ms | PASS |
-| key-existence lowering plus partial index | 5.79 ms | PASS |
+| Plan | p95 |
+|---|---:|
+| previous lowering, `src.Notiz IS NULL` | 59.61 ms |
+| key-existence lowering, no partial index | 22.79 ms |
+| key-existence lowering plus partial index | 5.79 ms |
 
 A 50-run stability pass measured 72.71 ms for the previous lowering and 6.43 ms with the partial
 index, so the index also removes the cold-cache and load sensitivity seen in QA.
 
-The gate measures the provider-generated Cypher without entity materialization
+These numbers measure the provider-generated Cypher without entity materialization
 (`SELECT count(*) FROM (SELECT * FROM cypher(...)) s`). Full entity loading is a separate cost;
 see the materialization guidance above. A partial index favours existence/count filters: loading
 all matching entities fetches their heap rows individually, which can be slower than the
 sequential scan for a large match. Keep it for existence checks and narrow result sets.
+
+### Native-id multi-alias membership
+
+AGE 1.8.0 returns `graphid` from `id()` while a list parameter is `agtype`. The native
+`id(alias) IN <agtype list>` form fails with `XX000: not a common type` (and can crash the backend),
+so on AGE 1.8 a multi-alias predicate lowers each membership to the portable
+`id(alias)::agtype IN <list>` form. The cast makes both operands the same type and keeps the native
+list comparison, evaluated once per query instead of once per row. A single-alias predicate instead
+keeps one `UNWIND` per `(parameter, alias)` with `id(alias) = <unwound id>`; see
+[physical identity](provider-implementers-guide.md#physical-identity) in the provider implementers
+guide. An earlier row-preserving list comprehension evaluated the list once per candidate row —
+O(rows x ids) — and produced a cross product when several aliases shared one id list; that form was
+removed.
+
+Measured on AGE 1.7.0 and 1.8.0 with 1,000 nodes in a 999-edge `KNOWS` chain, both relationship
+endpoints filtered by the same 1,000-id list (`EXPLAIN (ANALYZE, TIMING OFF)`, 10 runs, median):
+
+| AGE | Shape | Median |
+|---|---|---:|
+| 1.7.0 | native `IN`, literal list | 2.4 ms |
+| 1.7.0 | casted `IN`, literal list | 2.3 ms |
+| 1.7.0 | casted `IN`, parameter | 11.3 ms |
+| 1.8.0 | native `IN`, literal list | error |
+| 1.8.0 | casted `IN`, literal list | 1.1 ms |
+| 1.8.0 | casted `IN`, parameter | 10.1 ms |
+| 1.8.0 | previous row-preserving form, parameter | 198.4 ms |
+
+AGE 1.7 keeps the native predicate unchanged. The 1.8 portable form runs in the 1-11 ms band for
+the 1,000-id/two-alias shape with either a literal list or a parameter, and returns the same 1,000
+rows instead of the 1,000,000-row cross product the per-row comprehension produced.
+
+### Declared-index paging floor
+
+Paging over a declared ordering property — `OrderBy Name`, `Skip 200`, `Take 100` over 30,000
+nodes with a sealed complex `Address` property, single client — runs at a measured floor of about
+40-48 ms median on AGE 1.7.0 and 1.8.0, with p95 in the 45-63 ms range depending on host noise. The
+baseline p95 without the declaration is 64-89 ms, so the declared paging path keeps a 1.4x-1.9x
+improvement.
+
+Absolute numbers depend on node count, client count, and PostgreSQL version, so re-measure on your
+own hardware before treating any absolute figure as a target.
 
 ### Pagination for Large Results
 
@@ -471,16 +533,16 @@ You can also run benchmarks directly:
 
 ```bash
 # Build the performance test project
-dotnet build tests/Graph.Performance.Tests --configuration Benchmark
+dotnet build tests/Graph.Neo4j.Performance.Tests --configuration Benchmark
 
 # Run all benchmarks (non-interactive)
-dotnet run --project tests/Graph.Performance.Tests --configuration Benchmark -- --all
+dotnet run --project tests/Graph.Neo4j.Performance.Tests --configuration Benchmark -- --all
 
 # Run specific benchmark class
-dotnet run --project tests/Graph.Performance.Tests --configuration Benchmark -- --filter "*CrudOperations*"
+dotnet run --project tests/Graph.Neo4j.Performance.Tests --configuration Benchmark -- --filter "*CrudOperations*"
 
 # Interactive mode (local development only)
-dotnet run --project tests/Graph.Performance.Tests --configuration Benchmark
+dotnet run --project tests/Graph.Neo4j.Performance.Tests --configuration Benchmark
 ```
 
 ## 🔄 CI/CD Integration

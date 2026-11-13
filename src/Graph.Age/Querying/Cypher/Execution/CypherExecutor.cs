@@ -32,14 +32,25 @@ internal sealed class CypherExecutor
         IReadOnlyList<string> projectionColumns,
         CypherPostProcessing? postProcessing,
         AgeGraphTransaction transaction,
+        CancellationToken cancellationToken = default) =>
+        await ExecuteAsync(
+                new AgeCommand(cypher, parameters, projectionColumns, postProcessing, Plan: null),
+                transaction,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<List<AgeRecord>> ExecuteAsync(
+        AgeCommand command,
+        AgeGraphTransaction transaction,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var cursor = await transaction.Runner.RunAsync(
-            cypher,
-            parameters,
-            projectionColumns,
-            postProcessing,
+            command.Text,
+            command.Parameters,
+            command.ProjectionColumns,
+            command.PostProcessing,
+            command.Plan,
             cancellationToken).ConfigureAwait(false);
         await using var cursorLease = cursor.ConfigureAwait(false);
         var records = await cursor.ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -63,12 +74,27 @@ internal sealed class CypherExecutor
         AgeGraphTransaction transaction,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        await foreach (var record in StreamAsync(
+            new AgeCommand(cypher, parameters, projectionColumns, postProcessing, Plan: null),
+            transaction,
+            cancellationToken).ConfigureAwait(false))
+        {
+            yield return record;
+        }
+    }
+
+    public static async IAsyncEnumerable<AgeRecord> StreamAsync(
+        AgeCommand command,
+        AgeGraphTransaction transaction,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         var cursor = await transaction.Runner.RunStreamingAsync(
-            cypher,
-            parameters,
-            projectionColumns,
-            postProcessing,
+            command.Text,
+            command.Parameters,
+            command.ProjectionColumns,
+            command.PostProcessing,
+            command.Plan,
             cancellationToken).ConfigureAwait(false);
         await using var cursorLease = cursor.ConfigureAwait(false);
         while (await cursor.FetchAsync(cancellationToken).ConfigureAwait(false))

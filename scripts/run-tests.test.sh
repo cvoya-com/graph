@@ -19,7 +19,9 @@ mkdir -p \
     "$TEST_ROOT/tests/Graph.Analyzers.Tests" \
     "$TEST_ROOT/tests/Graph.Neo4j.Tests" \
     "$TEST_ROOT/tests/Graph.Age.Tests" \
-    "$TEST_ROOT/tests/Graph.Performance.Tests"
+    "$TEST_ROOT/tests/Graph.Performance.Tests.Shared" \
+    "$TEST_ROOT/tests/Graph.Age.Performance.Tests" \
+    "$TEST_ROOT/tests/Graph.Neo4j.Performance.Tests"
 
 touch \
     "$TEST_ROOT/cvoya-graph.sln" \
@@ -27,7 +29,9 @@ touch \
     "$TEST_ROOT/tests/Graph.Analyzers.Tests/Graph.Analyzers.Tests.csproj" \
     "$TEST_ROOT/tests/Graph.Neo4j.Tests/Graph.Neo4j.Tests.csproj" \
     "$TEST_ROOT/tests/Graph.Age.Tests/Graph.Age.Tests.csproj" \
-    "$TEST_ROOT/tests/Graph.Performance.Tests/Graph.Performance.Tests.csproj"
+    "$TEST_ROOT/tests/Graph.Performance.Tests.Shared/Graph.Performance.Tests.Shared.csproj" \
+    "$TEST_ROOT/tests/Graph.Age.Performance.Tests/Graph.Age.Performance.Tests.csproj" \
+    "$TEST_ROOT/tests/Graph.Neo4j.Performance.Tests/Graph.Neo4j.Performance.Tests.csproj"
 
 cp "$REPOSITORY_ROOT/scripts/run-tests.sh" "$TEST_ROOT/scripts-run-tests.sh"
 

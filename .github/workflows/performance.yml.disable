@@ -52,7 +52,7 @@ jobs:
       run: dotnet restore
 
     - name: 🔨 Build Benchmarks
-      run: dotnet build tests/Graph.Performance.Tests --configuration Benchmark --no-restore
+      run: dotnet build tests/Graph.Neo4j.Performance.Tests --configuration Benchmark --no-restore
 
     - name: ⏳ Wait for Neo4j
       run: |
@@ -62,7 +62,7 @@ jobs:
 
     - name: 🏃‍♂️ Run Performance Tests
       run: |
-        dotnet run --project tests/Graph.Performance.Tests \
+        dotnet run --project tests/Graph.Neo4j.Performance.Tests \
           --configuration Benchmark --no-build \
           -- --all --artifacts ./artifacts/benchmarks \
           --exporters json html

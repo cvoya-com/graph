@@ -62,6 +62,13 @@ public sealed record CypherStatement
     /// </remarks>
     internal CypherPostProcessing? PostProcessing { get; init; }
 
+    /// <summary>
+    /// Returns a copy of this statement with a replacement clause sequence, preserving the
+    /// parameter values and provider post-processing metadata.
+    /// </summary>
+    internal CypherStatement WithClauses(IReadOnlyList<ICypherClause> clauses) =>
+        new(clauses, Parameters, PathTypes) { PostProcessing = PostProcessing };
+
     private static ReadOnlyDictionary<string, object?> CopyParameters(IReadOnlyDictionary<string, object?> parameters)
     {
         var copy = new Dictionary<string, object?>(StringComparer.Ordinal);

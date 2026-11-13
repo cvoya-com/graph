@@ -204,11 +204,17 @@ internal sealed class AgeEntityProjectionPass : ICypherPass
             EntityProjectionClause projection)
         {
             IReadOnlyList<string> aliases = [projection.SourceAlias, .. projection.RowIdentityAliases];
-            AppendPropertyMatch(clauses, projection.SourceAlias, "src", "rels", "prop");
+            var sourceSingleHop = AppendPropertyMatch(
+                clauses,
+                projection.SourceAlias,
+                "src",
+                "rels",
+                "prop",
+                projection.SourceComplexPropertyDepth);
             clauses.Add(new WithClause(
                 CarryItems(aliases, projection.Ordering)
                     .Append(new ReturnItem(
-                        PropertyPath("src_path", projection.SourceAlias, "rels"),
+                        PropertyPath("src_path", projection.SourceAlias, "rels", sourceSingleHop),
                         "src_property_path"))
                     .ToArray(),
                 distinct: false));
@@ -232,11 +238,17 @@ internal sealed class AgeEntityProjectionPass : ICypherPass
 
             if (projection.LoadSourceProperties)
             {
-                AppendPropertyMatch(clauses, projection.SourceAlias, "src", "rels", "prop");
+                var sourceSingleHop = AppendPropertyMatch(
+                    clauses,
+                    projection.SourceAlias,
+                    "src",
+                    "rels",
+                    "prop",
+                    projection.SourceComplexPropertyDepth);
                 clauses.Add(new WithClause(
                     CarryItems(aliases, projection.Ordering)
                         .Append(new ReturnItem(
-                            PropertyPath("src_path", projection.SourceAlias, "rels"),
+                            PropertyPath("src_path", projection.SourceAlias, "rels", sourceSingleHop),
                             "src_property_path"))
                         .ToArray(),
                     distinct: false));
@@ -257,12 +269,18 @@ internal sealed class AgeEntityProjectionPass : ICypherPass
 
             if (projection.LoadTargetProperties)
             {
-                AppendPropertyMatch(clauses, projection.TargetAlias!, "tgt", "trels", "tprop");
+                var targetSingleHop = AppendPropertyMatch(
+                    clauses,
+                    projection.TargetAlias!,
+                    "tgt",
+                    "trels",
+                    "tprop",
+                    projection.TargetComplexPropertyDepth);
                 clauses.Add(new WithClause(
                     CarryItems(aliases, projection.Ordering)
                         .Append(Variable("src_properties"))
                         .Append(new ReturnItem(
-                            PropertyPath("tgt_path", projection.TargetAlias!, "trels"),
+                            PropertyPath("tgt_path", projection.TargetAlias!, "trels", targetSingleHop),
                             "tgt_property_path"))
                         .ToArray(),
                     distinct: false));
@@ -284,13 +302,18 @@ internal sealed class AgeEntityProjectionPass : ICypherPass
             }
         }
 
-        private static void AppendPropertyMatch(
+        private static bool AppendPropertyMatch(
             List<ICypherClause> clauses,
             string ownerAlias,
             string prefix,
             string relationshipsAlias,
-            string propertyAlias)
+            string propertyAlias,
+            int complexPropertyDepth)
         {
+            var maximumDepth = complexPropertyDepth > 0
+                ? complexPropertyDepth
+                : GraphDataModel.DefaultDepthAllowed;
+            var singleHop = maximumDepth == 1;
             clauses.Add(new MatchClause(
             [
                 new PathPattern(
@@ -299,29 +322,58 @@ internal sealed class AgeEntityProjectionPass : ICypherPass
                     new RelationshipPattern(
                         relationshipsAlias,
                         CypherDirection.Outgoing,
-                        new DepthRange(1, GraphDataModel.DefaultDepthAllowed),
+                        singleHop ? null : new DepthRange(1, maximumDepth),
                         types: []),
                     new NodePattern(propertyAlias, []),
-                ], $"{prefix}_path"),
+                ], singleHop ? null : $"{prefix}_path"),
             ], optional: true));
-            clauses.Add(new WhereClause(new AllExpression(
-                "rel",
+            var marker = new PropertyAccess(
                 new VariableRef(relationshipsAlias),
-                new BinaryExpression(
-                    CypherBinaryOperator.Equal,
-                    new PropertyAccess(
-                        new VariableRef("rel"),
-                        AgeDialect.Instance.ComplexPropertyRelationshipMarker),
-                    new Literal(true)))));
+                AgeDialect.Instance.ComplexPropertyRelationshipMarker);
+            clauses.Add(new WhereClause(singleHop
+                ? new BinaryExpression(CypherBinaryOperator.Equal, marker, new Literal(true))
+                : new AllExpression(
+                    "rel",
+                    new VariableRef(relationshipsAlias),
+                    new BinaryExpression(
+                        CypherBinaryOperator.Equal,
+                        new PropertyAccess(
+                            new VariableRef("rel"),
+                            AgeDialect.Instance.ComplexPropertyRelationshipMarker),
+                        new Literal(true)))));
+            return singleHop;
         }
 
         private static CaseExpression PropertyPath(
             string pathAlias,
             string ownerAlias,
-            string relationshipsAlias)
+            string relationshipsAlias,
+            bool singleHop)
         {
+            var relationships = new VariableRef(relationshipsAlias);
+            if (singleHop)
+            {
+                // A depth-1 type uses a direct relationship instead of a variable-length
+                // pattern; AGE plans the direct join against the bound owner rather than a VLE.
+                return new CaseExpression(
+                    new UnaryExpression(CypherUnaryOperator.IsNull, relationships),
+                    new ListExpression([]),
+                    new ListExpression(
+                    [
+                        new MapExpression(
+                        [
+                            new MapEntry("ParentNode", new VariableRef(ownerAlias)),
+                            new MapEntry("Relationship", relationships),
+                            new MapEntry(
+                                "SequenceNumber",
+                                new PropertyAccess(relationships, "SequenceNumber")),
+                            new MapEntry("Property", Function("endNode", relationships)),
+                        ]),
+                    ]));
+            }
+
             var index = new VariableRef("i");
-            var relationship = new IndexExpression(new VariableRef(relationshipsAlias), index);
+            var relationship = new IndexExpression(relationships, index);
             var pathNodes = Function("nodes", new VariableRef(pathAlias));
             return new CaseExpression(
                 new UnaryExpression(CypherUnaryOperator.IsNull, new VariableRef(pathAlias)),
@@ -332,7 +384,7 @@ internal sealed class AgeEntityProjectionPass : ICypherPass
                         new Literal(0),
                         new BinaryExpression(
                             CypherBinaryOperator.Subtract,
-                            Function("size", new VariableRef(relationshipsAlias)),
+                            Function("size", relationships),
                             new Literal(1))),
                     "i",
                     projection: new MapExpression(

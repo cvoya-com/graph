@@ -11,6 +11,7 @@ using Cvoya.Graph.Age.Entities;
 using Cvoya.Graph.Age.Querying.Cypher.Builders;
 using Cvoya.Graph.Age.Querying.Cypher.Lowering;
 using Cvoya.Graph.Age.Querying.Cypher.Visitors.Core;
+using Cvoya.Graph.Age.Schema;
 using Cvoya.Graph.Cypher;
 using Cvoya.Graph.Cypher.Ast;
 using Cvoya.Graph.Cypher.Planning;
@@ -24,6 +25,16 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 internal sealed class CypherEngine
 {
+    /// <summary>Parameter that carries the identities selected by a bulk update or delete.</summary>
+    internal const string SelectedIdsParameterName = "selectedIds";
+
+    /// <summary>
+    /// Excludes the selected identities from the proposed unique values without embedding one
+    /// literal equality per selected id.
+    /// </summary>
+    internal const string SelectedIdentityExclusionPredicate =
+        "size([selectedId IN $" + SelectedIdsParameterName + " WHERE selectedId = id(candidate)]) = 0";
+
     private enum ElementTerminal
     {
         None,
@@ -129,6 +140,7 @@ internal sealed class CypherEngine
 
         cancellationToken.ThrowIfCancellationRequested();
         var nativeIdentities = selected.Select(item => item.NativeIdentity).ToArray();
+        var indexLabels = ResolveIndexLabels(mutation.Selection);
         var constraintPlan = GraphMutationConstraintPlan.Create(mutation, _schemaRegistry);
         if (mutation.Kind == GraphMutationKind.Delete &&
             mutation.Selection.ElementKind == GraphElementKind.Node)
@@ -138,6 +150,9 @@ internal sealed class CypherEngine
                 mutation.CascadeDelete,
                 transaction,
                 cancellationToken).ConfigureAwait(false);
+            await transaction.Runner
+                .DeleteIndexAsync(nativeIdentities.Cast<long>().ToArray(), indexLabels, cancellationToken)
+                .ConfigureAwait(false);
         }
         else if (mutation.Kind == GraphMutationKind.Update)
         {
@@ -188,6 +203,13 @@ internal sealed class CypherEngine
                     updateComplexPlan.ReplacementEntity,
                     cancellationToken).ConfigureAwait(false);
             }
+
+            // Every declared index column is a derived cache of the label table, so an update
+            // refreshes all of them rather than special-casing one property name. The write is a
+            // single set-based statement per label and is skipped when no index table exists.
+            await transaction.Runner
+                .SyncIndexAsync(nativeIdentities.Cast<long>().ToArray(), indexLabels, cancellationToken)
+                .ConfigureAwait(false);
         }
         else
         {
@@ -197,6 +219,21 @@ internal sealed class CypherEngine
         }
 
         return selected.Count;
+    }
+
+    private static IReadOnlyList<string> ResolveIndexLabels(GraphElementSelectionModel selection)
+    {
+        if (selection.ElementKind != GraphElementKind.Node)
+        {
+            return [];
+        }
+
+        return selection.Query.Root switch
+        {
+            NodeRoot node => AgeTypeHierarchyRegistry.Instance.GetSubLabels(
+                Labels.GetLabelFromType(node.ElementType)),
+            _ => [],
+        };
     }
 
     private static GraphMutationModel BuildScalarMutation(GraphMutationModel mutation)
@@ -253,7 +290,7 @@ internal sealed class CypherEngine
     }
 
     private async Task ValidateUnselectedConstraintsAsync(
-        IReadOnlyList<long> selectedIdentities,
+        long[] selectedIdentities,
         GraphMutationConstraintPlan constraintPlan,
         IReadOnlyList<GraphMutationConstraintValue> proposed,
         AgeGraphTransaction transaction,
@@ -287,14 +324,17 @@ internal sealed class CypherEngine
         foreach (var candidate in proposed)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var parameters = new Dictionary<string, object?>
+            var parameters = new Dictionary<string, object?>();
+            var predicates = new List<string>();
+            if (selectedIdentities.Length > 0)
             {
-                ["selectedIds"] = selectedIdentities,
-            };
-            var predicates = new List<string>
-            {
-                "size([selectedId IN $selectedIds WHERE id(candidate) = selectedId]) = 0",
-            };
+                // Keep the selected set as one parameter. A list comprehension is portable on AGE
+                // 1.7 and 1.8 and leaves the query text independent of the selection size; a
+                // literal OR chain grows with every selected id and a bare id IN $list segfaults
+                // AGE 1.8.0.
+                parameters[SelectedIdsParameterName] = selectedIdentities;
+                predicates.Add(SelectedIdentityExclusionPredicate);
+            }
             for (var index = 0; index < candidate.Constraint.Properties.Count; index++)
             {
                 var parameterName = $"constraintValue{index}";
@@ -467,10 +507,12 @@ internal sealed class CypherEngine
 
             // Execute the query
             var records = await _executor.ExecuteAsync(
-                cypherQuery.Text,
-                cypherQuery.Parameters,
-                cypherQuery.ProjectionColumns ?? [],
-                cypherQuery.PostProcessing,
+                new AgeCommand(
+                    cypherQuery.Text,
+                    cypherQuery.Parameters,
+                    cypherQuery.ProjectionColumns ?? [],
+                    cypherQuery.PostProcessing,
+                    cypherQuery.Plan),
                 transaction,
                 cancellationToken).ConfigureAwait(false);
 
@@ -532,10 +574,12 @@ internal sealed class CypherEngine
         LogCypherQuery(cypherQuery);
 
         var records = CypherExecutor.StreamAsync(
-            cypherQuery.Text,
-            cypherQuery.Parameters,
-            cypherQuery.ProjectionColumns ?? [],
-            cypherQuery.PostProcessing,
+            new AgeCommand(
+                cypherQuery.Text,
+                cypherQuery.Parameters,
+                cypherQuery.ProjectionColumns ?? [],
+                cypherQuery.PostProcessing,
+                cypherQuery.Plan),
             transaction,
             cancellationToken);
 
@@ -777,7 +821,9 @@ internal sealed class CypherEngine
             Dialect,
             _graphName,
             loggerFactory,
-            _schemaRegistry.HasComplexProperties);
+            _schemaRegistry.HasComplexProperties,
+            AgeIndexCatalog.From(_schemaRegistry),
+            _context.SupportsNativeIdInPredicates);
         visitor.Visit(expression);
 
         var query = visitor.Query;
@@ -796,7 +842,8 @@ internal sealed class CypherEngine
             query.GraphPathTypes,
             query.ProjectionColumns,
             query.PostProcessing,
-            query.SumUnionCountBranches);
+            query.SumUnionCountBranches,
+            query.Plan);
     }
 
     private async Task<IReadOnlyList<IEntity>> LoadMixedSearchEntitiesAsync(

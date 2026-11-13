@@ -28,7 +28,9 @@ public sealed class AgeDialectTests
                 GraphCapability.GroupByAggregation,
                 GraphCapability.RelationshipPredicates,
                 GraphCapability.SetOperations,
-                GraphCapability.NullElementsInSimpleCollections),
+                GraphCapability.NullElementsInSimpleCollections,
+                GraphCapability.PropertyIndexes,
+                GraphCapability.PropertyAggregateIndexes),
             capabilities);
     }
 
@@ -154,14 +156,17 @@ public sealed class AgeDialectTests
     }
 
     [Fact]
-    public void RenderCollectionContains_KeepsListComprehensionForAge17()
+    public void RenderCollectionContains_UsesNativeIdMembershipOnlyForKnownAge17()
     {
         var dialect = AgeDialect.ForServer(
             new AgeServerCapabilities(new Version(1, 7, 0), AgeFeature.None));
 
         var identity = dialect.RenderCollectionContains("$graphIds", "id(src)");
 
-        Assert.StartsWith("size([__cvoya_collection_item IN $graphIds WHERE ", identity, StringComparison.Ordinal);
-        Assert.DoesNotContain("any(", identity, StringComparison.Ordinal);
+        Assert.Equal("(id(src) IN $graphIds)", identity);
+        Assert.StartsWith(
+            "size([__cvoya_collection_item IN $graphIds WHERE ",
+            AgeDialect.Instance.RenderCollectionContains("$graphIds", "id(src)"),
+            StringComparison.Ordinal);
     }
 }

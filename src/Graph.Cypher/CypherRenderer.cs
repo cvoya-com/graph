@@ -289,6 +289,7 @@ public sealed class CypherRenderer : ICypherRenderContext
             CollectionContainsExpression contains => RenderCollectionContains(contains),
             NativeElementIdentity identity => dialect.RenderNativeElementIdentity(
                 RenderExpression(identity.Target)),
+            CastExpression cast => $"{RenderExpression(cast.Operand)}::{cast.TargetType}",
             QueryParameter parameter => dialect.RenderParameter(parameter.Name),
             Literal literal => RenderLiteral(literal.Value),
             FunctionCall function => RenderFunction(function),

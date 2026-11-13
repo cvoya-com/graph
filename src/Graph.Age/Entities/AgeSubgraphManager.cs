@@ -137,6 +137,8 @@ internal sealed class AgeSubgraphManager(AgeGraphContext context)
         }
 
         var results = await transaction.Runner.RunBatchAsync(commands, cancellationToken).ConfigureAwait(false);
+        await SyncNewEndpointIndexesAsync(
+            transaction, newEndpoints, results, cancellationToken).ConfigureAwait(false);
         ValidateResults(
             results,
             sourceChecks,
@@ -145,6 +147,48 @@ internal sealed class AgeSubgraphManager(AgeGraphContext context)
             valueNodeLevels,
             newEndpoints,
             relationship.GetType().Name);
+    }
+
+    /// <summary>
+    /// Refreshes declared index rows for roots created by the batch. The batch captures each new
+    /// root's graphid in its creation command, so no additional token lookup is needed before or
+    /// after the cleanup command removes those tokens.
+    /// </summary>
+    private static async Task SyncNewEndpointIndexesAsync(
+        AgeGraphTransaction transaction,
+        IReadOnlyList<EndpointPlan> endpoints,
+        IReadOnlyList<AgeBatchResult> results,
+        CancellationToken cancellationToken)
+    {
+        var resultMap = results.ToDictionary(result => result.Name, StringComparer.Ordinal);
+        var byLabel = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        foreach (var endpoint in endpoints)
+        {
+            if (endpoint.StorageLabel is null || endpoint.CorrelationToken is null)
+            {
+                continue;
+            }
+
+            if (!resultMap.TryGetValue($"{endpoint.Name}_root", out var result) ||
+                result.Records.Count != 1)
+            {
+                throw new GraphException(
+                    $"AGE batch result '{endpoint.Name}_root' was missing or did not contain exactly one record.");
+            }
+
+            if (!byLabel.TryGetValue(endpoint.StorageLabel, out var ids))
+            {
+                ids = [];
+                byLabel[endpoint.StorageLabel] = ids;
+            }
+
+            ids.Add(result.Records[0]["id"].As<long>());
+        }
+
+        foreach (var (label, ids) in byLabel)
+        {
+            await transaction.Runner.SyncIndexAsync(ids, [label], cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -278,6 +322,7 @@ internal sealed class AgeSubgraphManager(AgeGraphContext context)
             relationshipEntity,
             relationshipStorageType,
             correlationPropertyName));
+
         commands.Add(BuildCleanupCommand(
             correlationPropertyName,
             newEndpoints.Select(endpoint => endpoint.CorrelationToken!)
@@ -318,16 +363,16 @@ internal sealed class AgeSubgraphManager(AgeGraphContext context)
         var storageLabel = CypherIdentifier.Escape(endpoint.StorageLabel, "node label");
         var correlationProperty = CypherIdentifier.Escape(correlationPropertyName, "correlation property name");
 
-        return CountCommand(
+        return new AgeBatchCommand(
             $"{endpoint.Name}_root",
             $$"""
             CREATE (node:{{storageLabel}})
             {{setClause}}
             SET node.{{correlationProperty}} = $correlationToken
-            RETURN count(node) AS createdCount
+            RETURN count(node) AS createdCount, id(node) AS id
             """,
             parameters,
-            "createdCount");
+            ["createdCount", "id"]);
     }
 
     private static AgeBatchCommand BuildValueNodeLevelCommand(
@@ -468,12 +513,18 @@ internal sealed class AgeSubgraphManager(AgeGraphContext context)
         return CountCommand(
             "cleanup",
             $$"""
+            UNWIND $correlationTokens AS correlationToken
             MATCH (node)
-            WHERE node.{{correlationProperty}} IN $correlationTokens
+            WHERE node.{{correlationProperty}} = correlationToken
             REMOVE node.{{correlationProperty}}
             RETURN count(node) AS cleanedCount
             """,
-            new Dictionary<string, object?> { ["correlationTokens"] = correlationTokens },
+            new Dictionary<string, object?>
+            {
+                // Deduplicate so the count stays exact after the list is unwound. AGE 1.8 cannot
+                // evaluate an IN with an agtype list parameter.
+                ["correlationTokens"] = correlationTokens.Distinct(StringComparer.Ordinal).ToArray(),
+            },
             "cleanedCount");
     }
 

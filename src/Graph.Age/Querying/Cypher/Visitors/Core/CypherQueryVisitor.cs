@@ -4,8 +4,10 @@
 namespace Cvoya.Graph.Age.Querying.Cypher.Visitors.Core;
 
 using System.Linq.Expressions;
+using Cvoya.Graph.Age.Querying.Cypher.Execution;
 using Cvoya.Graph.Age.Querying.Cypher.Lowering;
 using Cvoya.Graph.Age.Querying.Cypher.Planning;
+using Cvoya.Graph.Age.Schema;
 using Cvoya.Graph.Cypher;
 using Cvoya.Graph.Cypher.Ast;
 using Cvoya.Graph.Cypher.Planning;
@@ -29,12 +31,16 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
     private readonly string _graphName;
     private readonly ILogger<CypherQueryVisitor>? _logger;
     private readonly bool _hasComplexProperties;
+    private readonly AgeIndexCatalog _indexCatalog;
+    private readonly bool _supportsNativeIdInPredicates;
 
     public CypherQueryVisitor(
         Type type,
         ILoggerFactory? loggerFactory = null,
-        bool hasComplexProperties = true)
-        : this(type, AgeDialect.Instance, "cvoya_graph", loggerFactory, hasComplexProperties)
+        bool hasComplexProperties = true,
+        AgeIndexCatalog? indexCatalog = null,
+        bool supportsNativeIdInPredicates = false)
+        : this(type, AgeDialect.Instance, "cvoya_graph", loggerFactory, hasComplexProperties, indexCatalog, supportsNativeIdInPredicates)
     {
     }
 
@@ -43,7 +49,9 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         AgeDialect dialect,
         string graphName,
         ILoggerFactory? loggerFactory = null,
-        bool hasComplexProperties = true)
+        bool hasComplexProperties = true,
+        AgeIndexCatalog? indexCatalog = null,
+        bool supportsNativeIdInPredicates = false)
     {
         _rootType = type ?? throw new ArgumentNullException(nameof(type));
         _dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
@@ -51,17 +59,17 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         _graphName = graphName;
         _logger = loggerFactory?.CreateLogger<CypherQueryVisitor>();
         _hasComplexProperties = hasComplexProperties;
+        _indexCatalog = indexCatalog ?? AgeIndexCatalog.Empty;
+        _supportsNativeIdInPredicates = supportsNativeIdInPredicates;
     }
 
     private static CypherPassRunner CreateLoweringPasses(
         bool hasComplexProperties,
+        bool supportsNativeIdInPredicates,
         bool inSetOperationBranch = false) => new(
     [
         new AgeRelationshipPredicatePass(),
         new AgeCorrelatedProjectionPass(),
-        // A branch of an existing set operation must keep the containment fallback: expanding it
-        // would embed UNION ALL trees inside the outer UNION and discard the branch's lifted
-        // ordering/paging, which the execution wrapper cannot see.
         new AgeLabelPatternPass(hasComplexProperties, allowExpansion: !inSetOperationBranch),
         // Label lowering adds marker-based root-isolation EXISTS predicates. AGE parses those
         // subqueries but evaluates them incorrectly, so run the pattern-subquery lowering again
@@ -78,6 +86,9 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         // MATCH for this pass.
         new AgeUnionAllExpansionPass(allowExpansion: !inSetOperationBranch),
         new AgeSetOperationProjectionPass(),
+        // Runs last so the native-id predicate is rewritten in its final clause scope (after every
+        // aggregation, projection, and union branch has been lowered).
+        new AgeNativeIdListPass(supportsNativeIdInPredicates),
     ]);
 
     public CypherQuery Query { get; private set; } = CypherQuery.Empty;
@@ -88,6 +99,11 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         {
             return null;
         }
+
+        // Check the loaded-assembly set at plan time. The AssemblyLoad hook already invalidates
+        // the derived-type index, and this catches a load that raced the hook or happened between
+        // two plans.
+        GraphDataModel.EnsureDerivedTypeIndexCurrent();
 
         _logger?.LogDebugCypherQueryVisitor36(_rootType);
         CypherStatement statement;
@@ -105,7 +121,10 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
                 statement = new CypherQueryPlanner(_dialect.Planning).Plan(model);
             }
 
-            statement = LowerStatement(statement, _hasComplexProperties);
+            statement = LowerStatement(
+                statement,
+                _hasComplexProperties,
+                _supportsNativeIdInPredicates);
             sumUnionCountBranches = model.Terminal == TerminalOperation.Count &&
                 IsUnionOfGlobalCounts(statement.Clauses);
         }
@@ -121,13 +140,25 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         (Type Source, Type Relationship, Type Target)? pathTypes = statement.PathTypes is null
             ? null
             : (statement.PathTypes.Source, statement.PathTypes.Relationship, statement.PathTypes.Target);
+        // A plain equality filter over one string property is best answered by the GIN
+        // containment operator, so probe that shape first. Aggregates, distinct projections, and
+        // negated predicates do not match it and fall through to the indexed companion plans.
+        var containmentPlan = AgePropertyContainmentPlanBuilder.TryBuild(statement, node, _indexCatalog);
+        var statusColumnPlan = containmentPlan is null
+            ? AgeIndexedAggregatePlanBuilder.TryBuild(statement, node, _indexCatalog)
+            : null;
+        var pagePlan = containmentPlan is null && statusColumnPlan is null
+            ? AgeComplexPropertyPagingPlanBuilder.TryBuild(statement, node, _indexCatalog)
+            : null;
+        AgeExecutionPlan? plan = containmentPlan ?? (AgeExecutionPlan?)statusColumnPlan ?? pagePlan;
         Query = new CypherQuery(
             rendered.Text,
             rendered.Parameters,
             pathTypes,
             projectionColumns,
             statement.PostProcessing,
-            sumUnionCountBranches);
+            sumUnionCountBranches,
+            plan);
         if (_logger?.IsEnabled(LogLevel.Debug) == true)
         {
             _logger.LogDebugCypherQueryVisitor53(Query.Parameters.Keys.ToArray(), Query.Parameters.Count);
@@ -225,11 +256,12 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
     internal static CypherStatement LowerStatement(
         CypherStatement statement,
         bool hasComplexProperties = true,
+        bool supportsNativeIdInPredicates = false,
         bool inSetOperationBranch = false)
     {
         if (!statement.Clauses.Any(clause => clause is SetOperationClause))
         {
-            return CreateLoweringPasses(hasComplexProperties, inSetOperationBranch).Run(statement);
+            return CreateLoweringPasses(hasComplexProperties, supportsNativeIdInPredicates, inSetOperationBranch).Run(statement);
         }
 
         // Each branch is a complete query and needs the whole chain. Running that chain again over
@@ -240,7 +272,7 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         // must stay intact.
         var branches = AgeClauseContainerTraversal.RunSetOperationBranches(
             statement,
-            branch => LowerStatement(branch, hasComplexProperties, inSetOperationBranch: true));
+            branch => LowerStatement(branch, hasComplexProperties, supportsNativeIdInPredicates, inSetOperationBranch: true));
         return SetOperationProjectionPass.Run(branches);
     }
 

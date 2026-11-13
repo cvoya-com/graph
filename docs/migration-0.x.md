@@ -336,6 +336,85 @@ missing-capability reason, and translation rejects the operators. `AgeGraphStore
 the feature `Enabled` or `Disabled` per store. AGE `RelationshipPredicates` and `SetOperations` are
 supported; do not carry forward old workarounds or documentation that says otherwise.
 
+## Declared property indexes and aggregates
+
+AGE query acceleration is a new v1 capability and is opt-in: nothing is accelerated unless the
+host declares it. 0.x had no acceleration API, so there is nothing to remove during migration —
+adopt the declarations below for the queries you want to speed up.
+
+Declarations are provider-neutral metadata registered on `SchemaRegistry`. The AGE provider
+provisions physical structures only when you call `IGraphIndexMaintenance.EnsureIndexesAsync` on
+an `AgeGraphStore` constructed with that registry. The type-safe builder resolves the node label
+and the stored property names (group key and aggregate value) from `[Node]` and
+`[Property(Label = "...")]`; the string API remains available for dynamically composed node-label
+declarations. Declared indexes and aggregates are node-property features: the AGE provider does
+not build or plan relationship/edge indexes, and there is no `Relationship<T>()` builder:
+
+```csharp
+var registry = new SchemaRegistry();
+
+// Type-safe: Contract -> [Node("Contract")], Tier -> [Property(Label = "tariff")].
+registry.Node<Contract>()
+    .AddPropertyIndex(contract => contract.Tier)
+    .AddPropertyIndex(contract => contract.Name, PropertyIndexKind.Ordering)
+    .AddPropertyIndex(contract => contract.UnicodeName)
+    .AddPropertyAggregate(
+        contract => contract.Tier,
+        contract => contract.Kaufpreis,
+        AggregateFunction.Count | AggregateFunction.Sum | AggregateFunction.Min |
+        AggregateFunction.Max | AggregateFunction.Average);
+
+// Advanced string API for dynamically composed node-label declarations.
+registry.AddPropertyIndex(new PropertyIndexDefinition("Contract", "Status"));
+registry.AddPropertyAggregate(new PropertyAggregateDefinition(
+    "Contract", "tariff", "Kaufpreis", AggregateFunction.Count)); // merges additively
+
+await using var store = new AgeGraphStore(connectionString, graphName, registry);
+await store.EnsureIndexesAsync(cancellationToken);
+```
+
+`Node<TNode>()` accepts only simple instance property selectors. A nested, computed, indexer,
+static, field, or ignored-property expression fails with an `ArgumentException`/`GraphException`
+that names the member and the expected `entity => entity.Property` shape. The aggregate overload
+rejects equal resolved group/value names and non-numeric value types at declaration time; the
+provider still owns maintenance-time numeric validation. Registering the same label, property, and
+kind twice still throws `GraphException`, while repeating an aggregate pair merges its function
+flags additively.
+
+A store with no declarations keeps the ordinary AGE query and storage behavior. Declare the
+properties your hot queries depend on, then provision once per graph and declaration snapshot:
+
+- `AddPropertyIndex(property)` (the default `Equality` kind) accelerates equality filters,
+  `GROUP BY`, and `DISTINCT` over one string property.
+- `AddPropertyIndex(property, PropertyIndexKind.Ordering)` is the paging gate for `OrderBy` +
+  `Skip`/`Take` over one property. It is a plan gate, not a request to create physical storage.
+- `AddPropertyAggregate(groupKey, value, functions)` accelerates grouped `Count`/`Sum`/`Min`/
+  `Max`/`Average` over a numeric value.
+
+Queries and writes on undeclared properties keep the ordinary AGE path, so a declaration never
+changes results, only the plan. `EnsureIndexesAsync` and `DropIndexesAsync` are idempotent; a
+repeat call reports no new structures while still refreshing derived rows (ensure) or removing
+none (drop). Every writer instance must run `EnsureIndexesAsync` itself after joining the
+deployment: declarations alone never create or repair storage, and a store only trusts structures
+it provisioned itself.
+
+### AGE physical names
+
+Every declared label gets one companion table `<label>__idx` (or a bounded hashed form when the
+label name would exceed the PostgreSQL identifier limit). Column, index, trigger, and function
+names are SHA-256-derived and bounded, and the provider records each declaration in the graph's
+`__cvoya_index` catalog together with its physical names and format version. Inspect the catalog
+instead of guessing hashed names:
+
+```sql
+SELECT * FROM "<graph>"."__cvoya_index";
+```
+
+There are no special-cased physical names: a property literally named `Status` or `Kaufpreis` is
+stored and indexed exactly like any other property. The full operational detail for each feature —
+physical objects, scale-out locking, fallback behavior, cleanup, and cache tuning — is in
+[`src/Graph.Age/docs`](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/README.md).
+
 ## Suggested transition order
 
 1. Back up the alpha database and preserve the original application/export toolchain.

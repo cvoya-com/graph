@@ -288,6 +288,10 @@ public sealed class CypherAstValidator : ICypherPass
                 ValidateExpression(identity.Target, scope, parameters);
                 break;
 
+            case CastExpression cast:
+                ValidateExpression(cast.Operand, scope, parameters);
+                break;
+
             case QueryParameter parameter:
                 ValidateParameter(parameter.Name, parameters);
                 break;

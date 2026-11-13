@@ -125,6 +125,11 @@ public sealed class ComplianceInventoryTests
         GraphCapability[] recordOnly =
         [
             GraphCapability.NestedTransactions,
+            // Index maintenance is an optional interface, not an IGraph method, so the packaged
+            // TCK has no provider-binding surface to gate yet. Providers still declare the
+            // capability and the provider-implementers guide documents the contract.
+            GraphCapability.PropertyIndexes,
+            GraphCapability.PropertyAggregateIndexes,
         ];
 
         var covered = typeof(IGraphTest).Assembly.GetTypes()

@@ -95,12 +95,100 @@ Not every marker family is fully dispatched by Neo4j today. A new provider shoul
 
 Cross-provider compatibility depends on matching these conventions exactly.
 
+### Declared property indexes and aggregates
+
+`SchemaRegistry.AddPropertyIndex` and `AddPropertyAggregate` let an application declare that a
+provider may accelerate one property access pattern. A `PropertyIndexDefinition` names a node
+label, a stored property, and a `PropertyIndexKind` (`Equality` or `Ordering`). A
+`PropertyAggregateDefinition` names a label, a group-key property, a numeric value property, and the
+`AggregateFunction` flags the provider may maintain. The registry exposes the immutable
+`GraphIndexCatalog` snapshot through `SchemaRegistry.Indexes`.
+
+The user-facing feature guides, including database layout, scale-out, fallback, and cleanup, live in
+[`src/Graph.Age/docs`](https://github.com/cvoya-com/graph/blob/main/src/Graph.Age/docs/README.md). Use them for operational detail; this guide
+keeps the provider contract. `SchemaRegistry.Node<TNode>()` adds a type-safe fluent front end with
+`AddPropertyIndex` and `AddPropertyAggregate` overloads that resolve the node label and stored
+property names from the same `[Node]`/`[Property]` metadata. The aggregate overload validates both
+selectors and rejects a non-numeric value CLR type or equal resolved names at declaration time; the
+provider still owns maintenance-time numeric validation. The advanced
+`AddPropertyIndex(PropertyIndexDefinition)` and
+`AddPropertyAggregate(PropertyAggregateDefinition)` APIs remain available for dynamically composed
+declarations.
+
+Declared property indexes and aggregates are **node-property features**: a declaration names a node
+label. The AGE provider has no relationship-property index surface, so it neither materializes nor
+plans relationship/edge indexes. There is no `Relationship<T>()` builder; the advanced string API is
+for dynamically composed node-label declarations.
+
+Declarations are metadata only. Registering one never changes query results and never creates
+storage by itself. A provider that can materialize declarations implements `IGraphIndexMaintenance`
+and appends `GraphCapability.PropertyIndexes` and/or `GraphCapability.PropertyAggregateIndexes` to
+its capability set. A provider that cannot honor a declaration simply keeps its ordinary behavior
+and must not declare the capability.
+
+The maintenance contract is explicit and idempotent:
+
+- `EnsureIndexesAsync` creates or refreshes only the structures the declarations require, then
+  backfills existing data. A second call reports no new structures and still refreshes derived
+  rows.
+- `DropIndexesAsync` removes those structures and leaves ordinary reads and writes untouched.
+- A provider must fall back to its unmodified query path whenever a required derived structure is
+  absent, so a partially migrated graph stays correct.
+- Provider-owned derived structures are caches of the label data. A provider must synchronize them
+  in the same transaction as create, update, and delete, and must document the repair operation for
+  writes that bypass the provider.
+- `PropertyIndexKind.Ordering` is an eligibility gate for a provider's paging plan, not a request
+  to create an index. The AGE paging plan orders by a declared `Equality` companion text B-tree when
+  every paged label declares both `Equality` and `Ordering` for a string sort property; otherwise it
+  keeps the ordinary accessor ordering. An ordering-only declaration never creates a structure.
+- The AGE v1 implementation records one catalog row per logical declaration plus the derived rows a
+  declaration needs: the group-key text `index` row and one `column` row for each aggregate value.
+  A property+aggregate pair therefore records three rows (index, column, aggregate), and an
+  aggregate-only label records three rows as well (derived group-key index, value column, aggregate).
+  It backfills each label in one statement inside the maintenance transaction. It does not yet
+  support several concurrent format versions or a batched/lock-budgeted backfill for very large
+  graphs; plan for the maintenance window and treat the catalog version as the upgrade guard.
+- Declarations are provider-neutral metadata. A provider may skip a declaration whose label or
+  property is absent from the physical graph; `GraphIndexMaintenanceReport.DefinitionsInspected`
+  counts the declared definitions it inspected, not physical structures or matches. `DropIndexesAsync`
+  uses the current declaration snapshot, so after `SchemaRegistry.ClearAsync()` it reports
+  0 definitions while still removing the structures recorded in the provider catalog. A bounded
+  pre-catalog fallback probes only the current generalized `<label>__idx` family for a label with no
+  recorded rows; the catalog is authoritative for aggregates.
+
+The AGE provider keeps derived columns in one generalized `<label>__idx` companion table for every
+label and maintains declared aggregates in per-declaration `<label>__agg_<hash>` tables. Column,
+index, function, and trigger names are SHA-256-derived and length-bounded through
+`AgePhysicalName`; there is no property-name-specific special case. It records every physical
+object and its format version in the documented `__cvoya_index` catalog table and fails closed when
+a catalog row declares a newer format. The catalog keys structures by the AGE physical label, so a
+non-native label stored under an encoded name is provisioned and queried through the same
+declarations. On drop it removes every recorded generalized table, aggregate table, function, and
+trigger, and is idempotent. Physical naming is fully generalized — a property named `Status` or
+`Kaufpreis` uses the same hashed scheme as any other — see
+[AGE physical names](migration-0.x.md#age-physical-names) in the migration guide.
+AGE plan selection is catalog-driven: an undeclared property always keeps the ordinary Cypher path,
+and a missing companion table falls back to the accessor ordering.
+
 ### Physical identity
 
 Provider-native node and relationship identity is private plumbing. It may be used inside one
 query or write transaction to de-duplicate selected rows, correlate command results, or connect
 endpoints, but it is neither portable nor part of `IEntity`. Do not materialize it into typed or
 dynamic property bags, infer an `Id` convention, or make users persist endpoint identifiers.
+
+AGE returns `agtype` from `id(alias)`, and AGE 1.8 cannot evaluate `id(alias) IN <agtype list
+parameter>`: the original shape can segfault and a multi-element numeric literal list is rejected
+with `XX000: not a common type`. The AGE lowering therefore rewrites native-id membership only on
+that version. A single positive alias keeps one `UNWIND` per `(parameter, native alias)` so the id
+equality stays adjacent to the label pattern; a predicate with more than one `(parameter, native
+alias)` key, any membership under `OR`/`NOT`, and any literal list use the portable
+`id(alias)::agtype IN $ids` cast instead of stacking `UNWIND`s, so the row source never becomes the
+id cross product. The store detects the extension version
+once and leaves native `IN` unchanged on AGE 1.7, where the server supports it. On AGE 1.8 a
+native-id predicate on `OPTIONAL MATCH` fails closed with `GraphQueryTranslationException`: an
+`UNWIND` would drop the optional null row and AGE 1.8 cannot type the comprehension in that
+position. Filter the ids before the optional match.
 
 Relationships own only their mapped properties and runtime `Type`. The graph command API receives
 endpoint intent separately: selected endpoints are frozen as exactly-one node selections, new
@@ -194,9 +282,24 @@ must not infer complex-property edges from a reserved relationship-name prefix.
 When **dynamic** entities are materialized, a complex-property value is reconstructed into the property bag using one canonical shape, shared by dynamic nodes and dynamic relationships so the same stored value round-trips identically regardless of owner: a single complex value becomes a `Dictionary<string, object?>` keyed by the stored (physical) property labels, and a complex-property collection becomes a `List<Dictionary<string, object?>?>`. A simple collection nested inside such a dictionary follows the canonical `List<T>` rule above, and a nested complex value recurses into a further dictionary, so the whole subtree survives the round trip. A dynamic entity has no CLR type to materialize into, so the value is never rehydrated as a typed instance. Providers that decompose complex values into storage nodes must remove those nodes' synthetic `Id` and `Labels` members when rebuilding the dictionary; only caller-supplied value members belong in the materialized shape.
 
 Declared properties auto-load recursively. Writes and reads must reject cycles and paths deeper than
-`GraphDataModel.DefaultDepthAllowed` (currently 5). A read type that omits the property leaves it
-unpopulated; callers can still traverse the semantic relationship and co-load the owner and value via
-the normal path-segment projection.
+`GraphDataModel.DefaultDepthAllowed` (currently 5). Bound a read traversal by the projected type's
+declared complex-property depth where the type is resolvable: a depth-1 object property needs one
+hop, while a deeper nested or collection shape needs its actual nesting depth. For a non-sealed
+property type, include every concrete derived type loaded in the process, because hydration resolves
+the stored runtime type and may materialize derived-only nested values; a non-sealed leaf with no
+nested complex property therefore still needs one hop, not the global range. The derived set comes
+from one shared index built per loaded-assembly identity set, not a per-type scan of every assembly;
+a plan compares the current identity set with the snapshot used for the build before it reads the
+index, so a type loaded between plans is observed and a same-count unload-plus-load swap is not
+mistaken for an unchanged set. A collectible plugin assembly is excluded from that shared index
+because a cached `Type` would root its load context. A collectible base is measured against a
+transient all-loaded-assembly scan, and a non-collectible base is measured with the shared index
+plus a transient scan of the loaded plugin assemblies, so a plugin-derived nested value is not
+truncated to the base type's own assembly. Only the resulting integer bound is cached. Keep the
+global bound only as the safety ceiling for recursive,
+interface, dynamic, or otherwise unresolvable types. A read type that omits the property leaves it
+unpopulated; callers can still traverse the semantic relationship and co-load the owner and value
+via the normal path-segment projection.
 
 ### Type Metadata
 
@@ -539,6 +642,8 @@ Every optional `GraphCapability` is either certified by a `[RequiresCapability]`
 | `ShortestPath` | `IQueryTraversalTests.ShortestPaths_PinSelectionEndpointDirectionNoPathAndSameNodeSemantics` | method | pass | pass | pass (1.8) / skip (1.7) |
 | `SetOperations` | `IQueryTraversalTests.TypedUnionAndConcat_PinDistinctBagAndScalarProjectionSemantics` | method | pass | pass | pass |
 | `NullElementsInSimpleCollections` | `IBasicTests` and `IGraphCommandTests` null-bearing collection cases | method | pass | pass | pass |
+| `PropertyIndexes` | _record only; optional `IGraphIndexMaintenance` surface_ | — | — | — | — |
+| `PropertyAggregateIndexes` | _record only; optional `IGraphIndexMaintenance` surface_ | — | — | — | — |
 
 The correlated grouped-projection grammar (`GroupBy(seg => seg.StartNode).Select(g => new { … })`)
 is a shared contract, not a per-provider concern: the recognized per-member operations (`Select`,

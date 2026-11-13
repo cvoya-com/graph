@@ -629,7 +629,10 @@ public sealed class CypherQueryPlanner
 
         if (rewritten == keyParameter && typeof(INode).IsAssignableFrom(keyType))
         {
-            return new EntityProjectionExpression("src", HasComplexProperties(keyType));
+            return new EntityProjectionExpression(
+                "src",
+                HasComplexProperties(keyType),
+                ComplexPropertyDepth(keyType));
         }
 
         return lowerer.LowerLambda(Expression.Lambda(rewritten, keyParameter), "src");
@@ -1722,7 +1725,8 @@ public sealed class CypherQueryPlanner
                     new ReturnItem(
                         new EntityProjectionExpression(
                             state.CurrentTraversalSourceAlias,
-                            HasComplexProperties(optionalSelector.Parameters[0].Type)),
+                            HasComplexProperties(optionalSelector.Parameters[0].Type),
+                            ComplexPropertyDepth(optionalSelector.Parameters[0].Type)),
                         nameof(OptionalTraversalResult<INode>.Source)),
                     new ReturnItem(
                         new CaseExpression(
@@ -1732,7 +1736,8 @@ public sealed class CypherQueryPlanner
                             new Literal(null),
                             new EntityProjectionExpression(
                                 state.TargetAlias,
-                                HasComplexProperties(optionalSelector.Parameters[1].Type))),
+                                HasComplexProperties(optionalSelector.Parameters[1].Type),
+                                ComplexPropertyDepth(optionalSelector.Parameters[1].Type))),
                         nameof(OptionalTraversalResult<INode>.Target)),
                 ]);
             }
@@ -1893,10 +1898,12 @@ public sealed class CypherQueryPlanner
                 nameof(IGraphPathSegment.Relationship) => RelationshipExpression(state),
                 nameof(IGraphPathSegment.StartNode) => new EntityProjectionExpression(
                     state.CurrentTraversalSourceAlias,
-                    HasComplexProperties(member.Type)),
+                    HasComplexProperties(member.Type),
+                    ComplexPropertyDepth(member.Type)),
                 nameof(IGraphPathSegment.EndNode) => new EntityProjectionExpression(
                     state.TargetAlias,
-                    HasComplexProperties(member.Type)),
+                    HasComplexProperties(member.Type),
+                    ComplexPropertyDepth(member.Type)),
                 _ => throw new InvalidOperationException(),
             };
         }
@@ -1909,7 +1916,10 @@ public sealed class CypherQueryPlanner
 
         if (item is ParameterExpression node && typeof(INode).IsAssignableFrom(node.Type))
         {
-            return new EntityProjectionExpression(state.CurrentAlias, HasComplexProperties(node.Type));
+            return new EntityProjectionExpression(
+                state.CurrentAlias,
+                HasComplexProperties(node.Type),
+                ComplexPropertyDepth(node.Type));
         }
 
         return lowerer.LowerLambda(Expression.Lambda(argument, selector.Parameters), state.CurrentAlias);
@@ -1923,7 +1933,10 @@ public sealed class CypherQueryPlanner
         var item = StripConvert(argument);
         if (item is ParameterExpression parameter && typeof(INode).IsAssignableFrom(parameter.Type))
         {
-            return new EntityProjectionExpression(aliases[parameter], HasComplexProperties(parameter.Type));
+            return new EntityProjectionExpression(
+                aliases[parameter],
+                HasComplexProperties(parameter.Type),
+                ComplexPropertyDepth(parameter.Type));
         }
 
         return lowerer.Lower(argument, aliases);
@@ -2544,7 +2557,11 @@ public sealed class CypherQueryPlanner
             projection.LoadTargetProperties,
             includePathCoordinates: false,
             ordering: resultOrdering,
-            rowIdentityAliases: distinctApplied ? [] : projection.RowIdentityAliases));
+            rowIdentityAliases: distinctApplied ? [] : projection.RowIdentityAliases)
+        {
+            SourceComplexPropertyDepth = projection.SourceComplexPropertyDepth,
+            TargetComplexPropertyDepth = projection.TargetComplexPropertyDepth,
+        });
     }
 
     private static void AddGraphPathProjection(
@@ -2603,6 +2620,12 @@ public sealed class CypherQueryPlanner
             model.Traversal.LastOrDefault(step => !step.IsComplexPropertyTraversal) is not { Depth.Max: <= 1 };
         var loadSourceProperties = intermediateNodesPossible || HasComplexProperties(pathShape.SourceType);
         var loadTargetProperties = intermediateNodesPossible || HasComplexProperties(pathShape.TargetType);
+        var sourceDepth = intermediateNodesPossible
+            ? GraphDataModel.DefaultDepthAllowed
+            : ComplexPropertyDepth(pathShape.SourceType);
+        var targetDepth = intermediateNodesPossible
+            ? GraphDataModel.DefaultDepthAllowed
+            : ComplexPropertyDepth(pathShape.TargetType);
         clauses.Add(new ReturnClause(
         [
             new ReturnItem(new VariableRef("pathIndex"), null),
@@ -2610,9 +2633,13 @@ public sealed class CypherQueryPlanner
             new ReturnItem(
                 new MapExpression(
                 [
-                    new MapEntry("StartNode", new EntityProjectionExpression("src", loadSourceProperties)),
+                    new MapEntry(
+                        "StartNode",
+                        new EntityProjectionExpression("src", loadSourceProperties, sourceDepth)),
                     new MapEntry("Relationship", new VariableRef("r")),
-                    new MapEntry("EndNode", new EntityProjectionExpression("tgt", loadTargetProperties)),
+                    new MapEntry(
+                        "EndNode",
+                        new EntityProjectionExpression("tgt", loadTargetProperties, targetDepth)),
                 ]),
                 "PathSegment"),
         ], distinct: false));
@@ -2690,7 +2717,10 @@ public sealed class CypherQueryPlanner
                 loadTargetProperties: false,
                 includePathCoordinates: false,
                 ordering: [],
-                rowIdentityAliases: loadProperties ? ["p"] : []));
+                rowIdentityAliases: loadProperties ? ["p"] : [])
+            {
+                SourceComplexPropertyDepth = loadProperties ? ComplexPropertyDepth(entityType) : 0,
+            });
             return;
         }
 
@@ -2742,6 +2772,43 @@ public sealed class CypherQueryPlanner
                     return true;
                 }
             }));
+    }
+
+    /// <summary>
+    /// Gets the maximum complex-property relationship depth for a projected type.
+    /// </summary>
+    /// <remarks>
+    /// The bound is derived from the deepest compatible label type so a derived type that adds a
+    /// nested value is still hydrated completely. Interfaces, dynamic nodes, and unresolvable labels
+    /// keep the global storage bound: a wrong small bound would silently drop data.
+    /// </remarks>
+    private static int ComplexPropertyDepth(Type? type)
+    {
+        if (type is null || type.IsInterface || type == typeof(DynamicNode))
+            return GraphDataModel.DefaultDepthAllowed;
+
+        var maximumDepth = 0;
+        try
+        {
+            foreach (var label in Labels.GetCompatibleLabels(type))
+            {
+                var resolved = Labels.GetMostDerivedType(type, label);
+                if (resolved is null)
+                {
+                    return GraphDataModel.DefaultDepthAllowed;
+                }
+
+                maximumDepth = Math.Max(
+                    maximumDepth,
+                    GraphDataModel.GetComplexPropertyDepth(resolved));
+            }
+        }
+        catch (GraphException)
+        {
+            return GraphDataModel.DefaultDepthAllowed;
+        }
+
+        return maximumDepth;
     }
 
     private static Type? GetRootType(QueryRoot root)
@@ -2828,6 +2895,8 @@ public sealed class CypherQueryPlanner
         string? TargetAlias,
         bool LoadSourceProperties,
         bool LoadTargetProperties,
+        int SourceComplexPropertyDepth,
+        int TargetComplexPropertyDepth,
         IReadOnlyList<string> RowIdentityAliases,
         IReadOnlyList<ReturnItem>? Items)
     {
@@ -2843,6 +2912,8 @@ public sealed class CypherQueryPlanner
                 null,
                 loadProperties,
                 false,
+                loadProperties ? ComplexPropertyDepth(type) : 0,
+                0,
                 rowIdentityAliases ?? [],
                 null);
 
@@ -2854,6 +2925,8 @@ public sealed class CypherQueryPlanner
                 null,
                 false,
                 false,
+                0,
+                0,
                 [],
                 null);
 
@@ -2871,10 +2944,12 @@ public sealed class CypherQueryPlanner
                 target,
                 loadProperties && HasComplexProperties(sourceType),
                 loadProperties && HasComplexProperties(targetType),
+                loadProperties && HasComplexProperties(sourceType) ? ComplexPropertyDepth(sourceType) : 0,
+                loadProperties && HasComplexProperties(targetType) ? ComplexPropertyDepth(targetType) : 0,
                 [],
                 null);
 
         public static ProjectionPlan Scalar(IReadOnlyList<ReturnItem> items) =>
-            new(EntityProjectionShape.Node, null, null, null, false, false, [], items);
+            new(EntityProjectionShape.Node, null, null, null, false, false, 0, 0, [], items);
     }
 }

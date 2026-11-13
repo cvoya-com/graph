@@ -313,5 +313,27 @@ public class ConstructorValidationTests
         Assert.Equal(CypherUnaryOperator.Negate, expression.Op);
     }
 
+    [Fact]
+    public void EntityProjectionExpression_KeepsTheTwoArgumentConstructorForBinaryCompatibility()
+    {
+        // The (string, bool) overload must remain a real CLR constructor: a consumer compiled
+        // against the existing assembly resolves GetConstructor(string, bool) and fails with
+        // MissingMethodException when the signature only exists through an optional parameter.
+        var twoArgument = typeof(EntityProjectionExpression).GetConstructor([typeof(string), typeof(bool)]);
+        Assert.NotNull(twoArgument);
+
+        var expression = (EntityProjectionExpression)twoArgument.Invoke(["node", true]);
+        Assert.Equal("node", expression.Alias);
+        Assert.True(expression.LoadComplexProperties);
+        Assert.Equal(GraphDataModel.DefaultDepthAllowed, expression.ComplexPropertyDepth);
+
+        var threeArgument = typeof(EntityProjectionExpression).GetConstructor(
+            [typeof(string), typeof(bool), typeof(int)]);
+        Assert.NotNull(threeArgument);
+
+        var deep = (EntityProjectionExpression)threeArgument.Invoke(["node", false, 2]);
+        Assert.Equal(2, deep.ComplexPropertyDepth);
+    }
+
     private sealed record UnsupportedPatternElement : PatternElement;
 }
