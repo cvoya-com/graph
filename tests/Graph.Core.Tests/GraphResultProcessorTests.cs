@@ -550,9 +550,10 @@ public class GraphResultProcessorTests
         Assert.Equal(100, infos.Count);
         Assert.All(infos, info => Assert.Equal(typeof(ValueCollectionNode), info.ActualType));
 
-        // A per-node scan would build the index 100 times. Allow a few rebuilds for assemblies that
-        // other tests load concurrently (AssemblyLoad invalidates the cache), but keep a wide margin.
-        Assert.InRange(GraphResultProcessor.LabelIndexBuildCountForTesting(typeof(ValueCollectionNode)), 1, 20);
+        // A per-node scan would build the index 100 times. Zero builds is valid when a concurrently
+        // running test already built the shared index between the reset and this process call; a
+        // few rebuilds are valid because another test may load an assembly. Keep a wide upper margin.
+        Assert.InRange(GraphResultProcessor.LabelIndexBuildCountForTesting(typeof(ValueCollectionNode)), 0, 20);
     }
 
     private static void AssertSimpleCollection<T>(EntityInfo entity, string propertyName, IEnumerable<T> expected)
