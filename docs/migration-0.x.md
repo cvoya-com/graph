@@ -326,11 +326,14 @@ The portable contract is explicit:
 | Relationship predicates | Yes | Yes | Yes |
 | `Union` / `Concat` | Yes | Yes | Yes |
 | Nullable simple collection elements | Yes | Yes | Yes |
-| Shortest path | Yes | **No in v1.0** | Yes |
+| Shortest path | Yes | Yes on AGE 1.8+; skipped on 1.7 | Yes |
 | Whole-entity ordering | Yes | No | No |
 
-AGE shortest-path queries fail translation, and its capability-gated compatibility test skips with
-the standard missing-capability reason. AGE `RelationshipPredicates` and `SetOperations` are
+AGE declares `ShortestPath` only on Apache AGE 1.8.0 or later, where the native
+`ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths` functions are available. On AGE
+1.7 the capability is absent, the capability-gated compatibility test skips with the standard
+missing-capability reason, and translation rejects the operators. `AgeGraphStoreOptions` can force
+the feature `Enabled` or `Disabled` per store. AGE `RelationshipPredicates` and `SetOperations` are
 supported; do not carry forward old workarounds or documentation that says otherwise.
 
 ## Suggested transition order

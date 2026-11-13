@@ -31,12 +31,7 @@ internal sealed class GraphQueryProvider : GraphQueryProviderBase<AgeGraphTransa
         this.isReadOnly = isReadOnly;
         logger = context.LoggerFactory?.CreateLogger<GraphQueryProvider>()
             ?? NullLogger<GraphQueryProvider>.Instance;
-        cypherEngine = new CypherEngine(
-            context.EntityFactory,
-            context.SchemaRegistry,
-            context.GraphName,
-            context.ComplexPropertyManager,
-            context.LoggerFactory);
+        cypherEngine = new CypherEngine(context);
     }
 
     protected override async Task<TResult> ExecuteCoreAsync<TResult>(

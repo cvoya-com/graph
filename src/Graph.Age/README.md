@@ -59,11 +59,17 @@ An application that already owns its connection pool can pass an AGE-enabled
 - agtype adaptation for vertices, edges, paths, maps, arrays, large integers, decimals, and
   ISO-8601 temporal values.
 
-The provider declares full-text search, relationship predicates, and set operations. It does not
-declare nested transactions, whole-entity ordering, or `GraphCapability.ShortestPath`. Shortest
-path is deliberately unsupported for v1.0; the capability-gated TCK test skips for AGE, and #355
-tracks any future implementation. Unsupported operations fail during translation or are skipped
-only when a compatibility test is explicitly gated by the missing capability.
+The provider declares full-text search, relationship predicates, set operations, and—when the
+connected server is Apache AGE 1.8.0 or later—`GraphCapability.ShortestPath`. On AGE 1.8 the
+provider lowers `ShortestPath`/`AllShortestPaths` to the native
+`ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths` functions because the server
+does not parse the Cypher pattern syntax. On AGE 1.7 the capability stays absent, the
+capability-gated TCK test skips, and translation rejects the operators. `AgeGraphStoreOptions`
+can force `NativeShortestPath` and `NativePredicateFunctions` `Enabled` (fail clearly below 1.8)
+or `Disabled` (keep pre-1.8 behavior on a newer server). The provider does not
+declare nested transactions or whole-entity ordering. Unsupported operations fail during
+translation or are skipped only when a compatibility test is explicitly gated by the missing
+capability.
 
 ### Native storage and commands
 

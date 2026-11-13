@@ -109,7 +109,17 @@ public sealed class AgeFullTextSearchRewriterTests
 
         visitor.Visit(expression);
 
-        Assert.Contains("id(src) IN $", visitor.Query.Text, StringComparison.Ordinal);
+        // AGE 1.8.0 segfaults on id(x) IN <list parameter>, so identity membership must render as a
+        // filtered list comprehension and never as an IN with id() on the left.
+        Assert.DoesNotContain("id(src) IN", visitor.Query.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "size([__cvoya_collection_item IN $",
+            visitor.Query.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "__cvoya_collection_item = id(src)",
+            visitor.Query.Text,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("src.Id IN", visitor.Query.Text, StringComparison.Ordinal);
     }
 

@@ -523,6 +523,53 @@ public sealed class GraphResultProcessor
         return results;
     }
 
+    /// <summary>
+    /// Processes one whole native <see cref="GraphValueKind.Path"/> value into ordered hops. AGE's
+    /// native shortest-path functions return a single path value per row instead of the per-hop
+    /// rows produced by decomposed <c>TraversePaths</c> translation.
+    /// </summary>
+    public List<GraphPathHop> ProcessNativeGraphPath(
+        GraphValue path,
+        Type sourceType,
+        Type relationshipType,
+        Type targetType)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        if (path.Kind != GraphValueKind.Path)
+        {
+            throw new GraphException($"A native graph path result must be a path value, not '{path.Kind}'.");
+        }
+
+        var hops = new List<GraphPathHop>();
+        for (var index = 0; index + 2 < path.Items.Count; index += 2)
+        {
+            var startValue = path.Items[index];
+            var relationshipValue = path.Items[index + 1];
+            var endValue = path.Items[index + 2];
+            if (RequiresComplexProperties(startValue, sourceType) ||
+                RequiresComplexProperties(endValue, targetType) ||
+                HasComplexRelationshipProperties(relationshipType))
+            {
+                throw new GraphException(
+                    "Native shortest-path materialization does not load provider-owned complex properties. " +
+                    "Use TraversePaths for entity types with complex properties.");
+            }
+
+            var startNode = ProcessSingleNodeResult(new NodeResult(startValue, []), sourceType, preserveInterfaceShape: true);
+            var relationship = ProcessSingleRelationship(relationshipValue, relationshipType);
+            var endNode = ProcessSingleNodeResult(new NodeResult(endValue, []), targetType, preserveInterfaceShape: true);
+            hops.Add(new GraphPathHop(
+                0,
+                index / 2,
+                startNode,
+                relationship,
+                endNode,
+                GetPathSegmentDirection(relationshipValue, startValue, endValue)));
+        }
+
+        return hops;
+    }
+
     /// <summary>Processes one decomposed graph-path hop.</summary>
     public GraphPathHop ProcessGraphPathHop(GraphRecord record, Type sourceType, Type relationshipType, Type targetType)
     {
@@ -844,6 +891,46 @@ public sealed class GraphResultProcessor
                 .SelectMany(c => c.GetParameters())
                 .FirstOrDefault(p => string.Equals(p.Name, projectionName, StringComparison.OrdinalIgnoreCase))
                 ?.ParameterType;
+    }
+
+    private static bool HasComplexRelationshipProperties(Type relationshipType)
+    {
+        try
+        {
+            return GraphDataModel.GetComplexProperties(relationshipType).Any();
+        }
+        catch (GraphException)
+        {
+            return true;
+        }
+    }
+
+    private static bool RequiresComplexProperties(GraphValue node, Type fallbackType)
+    {
+        try
+        {
+            if (GraphDataModel.GetComplexProperties(fallbackType).Any())
+            {
+                return true;
+            }
+
+            foreach (var label in node.Labels)
+            {
+                var resolved = Labels.GetMostDerivedType(fallbackType, label);
+                if (resolved is not null && GraphDataModel.GetComplexProperties(resolved).Any())
+                {
+                    return true;
+                }
+            }
+        }
+        catch (GraphException)
+        {
+            // An unresolvable label must not be treated as "no complex properties": silently
+            // omitting a declared complex property would corrupt the materialized entity.
+            return true;
+        }
+
+        return false;
     }
 
     private static RelationshipDirection GetPathSegmentDirection(

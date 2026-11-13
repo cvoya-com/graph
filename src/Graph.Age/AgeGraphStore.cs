@@ -5,6 +5,7 @@ namespace Cvoya.Graph.Age;
 
 using Cvoya.Graph.Age.Core;
 using Cvoya.Graph.Age.Querying;
+using Cvoya.Graph.Age.Querying.Cypher;
 using Cvoya.Graph.Age.Querying.Cypher.Execution;
 using Cvoya.Graph.Age.Schema;
 using Microsoft.Extensions.Logging;
@@ -22,20 +23,45 @@ public sealed class AgeGraphStore : IAsyncDisposable
 {
     private readonly NpgsqlDataSource dataSource;
     private readonly bool ownsDataSource;
+    private readonly AgeGraphStoreOptions options;
     private readonly SemaphoreSlim provisioningGate = new(1, 1);
+    private readonly SemaphoreSlim capabilitiesGate = new(1, 1);
     private int disposed;
     private volatile bool graphReady;
+    private AgeDialect? dialect;
+    private volatile AgeServerCapabilities? serverCapabilities;
 
     /// <summary>Initializes a store from a PostgreSQL connection string.</summary>
+    /// <remarks>
+    /// Retained with the original four-parameter signature for binary compatibility; prefer the
+    /// overload that also accepts <see cref="AgeGraphStoreOptions"/>. Defaults for the optional
+    /// parameters live on that overload.
+    /// </remarks>
+    /// <param name="connectionString">The connection string, or <see langword="null"/> to use <c>AGE_CONNECTION_STRING</c>.</param>
+    /// <param name="graphName">The AGE graph name, or <see langword="null"/> to use <c>AGE_GRAPH</c> or <c>cvoya_graph</c>.</param>
+    /// <param name="schemaRegistry">The schema registry, or <see langword="null"/> for a new one.</param>
+    /// <param name="loggerFactory">The logger factory, or <see langword="null"/> for a null logger.</param>
+    public AgeGraphStore(
+        string? connectionString,
+        string? graphName,
+        SchemaRegistry? schemaRegistry,
+        ILoggerFactory? loggerFactory)
+        : this(connectionString, graphName, schemaRegistry, loggerFactory, options: null)
+    {
+    }
+
+    /// <summary>Initializes a store from a PostgreSQL connection string with provider options.</summary>
     /// <param name="connectionString">The connection string, or <see langword="null"/> to use <c>AGE_CONNECTION_STRING</c>.</param>
     /// <param name="graphName">The AGE graph name, or <see langword="null"/> to use <c>AGE_GRAPH</c> or <c>cvoya_graph</c>.</param>
     /// <param name="schemaRegistry">An optional schema registry.</param>
     /// <param name="loggerFactory">An optional logger factory.</param>
+    /// <param name="options">Provider behavior options; <see langword="null"/> uses the defaults.</param>
     public AgeGraphStore(
         string? connectionString = null,
         string? graphName = null,
         SchemaRegistry? schemaRegistry = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        AgeGraphStoreOptions? options = null)
     {
         connectionString ??= Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING");
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -48,22 +74,44 @@ public sealed class AgeGraphStore : IAsyncDisposable
         builder.UseAge();
         dataSource = builder.Build();
         ownsDataSource = true;
+        this.options = options ?? new AgeGraphStoreOptions();
         GraphName = ResolveGraphName(graphName);
         LoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         Graph = new AgeGraph(this, GraphName, schemaRegistry ?? new SchemaRegistry(), LoggerFactory);
     }
 
     /// <summary>Initializes a store from an externally owned AGE-enabled data source.</summary>
+    /// <remarks>
+    /// Retained with the original four-parameter signature for binary compatibility; prefer the
+    /// overload that also accepts <see cref="AgeGraphStoreOptions"/>. Defaults for the optional
+    /// parameters live on that overload.
+    /// </remarks>
+    /// <param name="dataSource">A data source configured with <c>UseAge()</c>.</param>
+    /// <param name="graphName">The AGE graph name.</param>
+    /// <param name="schemaRegistry">The schema registry, or <see langword="null"/> for a new one.</param>
+    /// <param name="loggerFactory">The logger factory, or <see langword="null"/> for a null logger.</param>
+    public AgeGraphStore(
+        NpgsqlDataSource dataSource,
+        string graphName,
+        SchemaRegistry? schemaRegistry,
+        ILoggerFactory? loggerFactory)
+        : this(dataSource, graphName, schemaRegistry, loggerFactory, options: null)
+    {
+    }
+
+    /// <summary>Initializes a store from an externally owned AGE-enabled data source with provider options.</summary>
     /// <param name="dataSource">A data source configured with <c>UseAge()</c>.</param>
     /// <param name="graphName">The AGE graph name.</param>
     /// <param name="schemaRegistry">An optional schema registry.</param>
     /// <param name="loggerFactory">An optional logger factory.</param>
+    /// <param name="options">Provider behavior options; <see langword="null"/> uses the defaults.</param>
     public AgeGraphStore(
         NpgsqlDataSource dataSource,
         string graphName,
         SchemaRegistry? schemaRegistry = null,
-        ILoggerFactory? loggerFactory = null)
-        : this(dataSource, graphName, schemaRegistry, loggerFactory, batchExecutionObserver: null)
+        ILoggerFactory? loggerFactory = null,
+        AgeGraphStoreOptions? options = null)
+        : this(dataSource, graphName, schemaRegistry, loggerFactory, batchExecutionObserver: null, options: options)
     {
     }
 
@@ -73,10 +121,12 @@ public sealed class AgeGraphStore : IAsyncDisposable
         SchemaRegistry? schemaRegistry,
         ILoggerFactory? loggerFactory,
         Action? batchExecutionObserver,
-        Func<AgeBatchCommand, AgeBatchCommand>? batchCommandTransform = null)
+        Func<AgeBatchCommand, AgeBatchCommand>? batchCommandTransform = null,
+        AgeGraphStoreOptions? options = null)
     {
         this.dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
         ownsDataSource = false;
+        this.options = options ?? new AgeGraphStoreOptions();
         GraphName = ResolveGraphName(graphName);
         LoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         BatchExecutionObserver = batchExecutionObserver;
@@ -190,6 +240,44 @@ public sealed class AgeGraphStore : IAsyncDisposable
 
     internal string GraphName { get; }
 
+    /// <summary>
+    /// Gets the Apache AGE server capabilities detected on this store's first connection.
+    /// </summary>
+    internal AgeServerCapabilities ServerCapabilities =>
+        serverCapabilities ?? new AgeServerCapabilities(new Version(1, 7, 0), AgeFeature.None);
+
+    /// <summary>
+    /// Gets the dialect for the connected AGE server. The installed extension version is detected
+    /// once on the first connection and cached on this store.
+    /// </summary>
+    internal AgeDialect Dialect => Volatile.Read(ref dialect) ?? AgeDialect.ForServer(ServerCapabilities);
+
+    /// <summary>Gets the capabilities of the connected AGE server.</summary>
+    internal CapabilitySet Capabilities => Dialect.Capabilities;
+
+    /// <summary>
+    /// Detects and caches the connected server's Apache AGE version and optional features.
+    /// </summary>
+    /// <param name="cancellationToken">A token that cancels the operation.</param>
+    /// <returns>The detected capabilities.</returns>
+    /// <remarks>
+    /// Detection runs once per store. It is safe to call concurrently and from a read-only
+    /// workload because it only reads <c>pg_extension</c> and function catalog metadata.
+    /// </remarks>
+    public async Task<AgeServerCapabilities> GetServerCapabilitiesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (serverCapabilities is { } cached)
+        {
+            return cached;
+        }
+
+        var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connectionLease = connection.ConfigureAwait(false);
+        return serverCapabilities
+            ?? throw new GraphException("Apache AGE server capability detection did not complete.");
+    }
+
     internal ILoggerFactory LoggerFactory { get; }
 
     /// <summary>
@@ -226,6 +314,7 @@ public sealed class AgeGraphStore : IAsyncDisposable
         try
         {
             await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
+            await EnsureServerCapabilitiesAsync(connection, cancellationToken).ConfigureAwait(false);
             return connection;
         }
         catch
@@ -464,6 +553,38 @@ public sealed class AgeGraphStore : IAsyncDisposable
     {
         graphName ??= Environment.GetEnvironmentVariable("AGE_GRAPH") ?? "cvoya_graph";
         return AgeSqlIdentifier.Validate(graphName, "graph name");
+    }
+
+    /// <summary>
+    /// Detects and caches the installed AGE extension version and optional features. Capabilities
+    /// differ between 1.7 and 1.8, so the provider cannot use one static dialect for every server.
+    /// </summary>
+    private async Task EnsureServerCapabilitiesAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        if (serverCapabilities is not null)
+        {
+            return;
+        }
+
+        await capabilitiesGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (serverCapabilities is null)
+            {
+                var detected = await AgeServerCapabilityDetector
+                    .DetectAsync(connection, options, cancellationToken)
+                    .ConfigureAwait(false);
+                var detectedDialect = AgeDialect.ForServer(detected);
+                Interlocked.CompareExchange(ref dialect, detectedDialect, null);
+                serverCapabilities = detected;
+            }
+        }
+        finally
+        {
+            capabilitiesGate.Release();
+        }
     }
 
     private static async Task ConfigureConnectionAsync(

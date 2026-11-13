@@ -78,6 +78,10 @@ dotnet pack src/Graph/Graph.csproj --configuration Release
 # Start both provider services and run all tests
 ./scripts/run-tests.sh --lane all --neo4j --age
 
+# Run the AGE suite against both released AGE versions (1.7.0 on port 5455, 1.8.0 on port 5456)
+./scripts/containers/start-age.sh all
+./scripts/run-tests.sh --lane age --age-versions 1.7.0,1.8.0 --no-build
+
 # Run performance tests
 ./scripts/run-tests.sh --fast --performance
 ```

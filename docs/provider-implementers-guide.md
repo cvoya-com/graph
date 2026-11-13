@@ -311,8 +311,15 @@ indexed list filtering and lowers anchored existence patterns through grouped op
 Implementations select paths independently for every source/endpoint pair, evaluate the endpoint
 predicate before selection, exclude the source as an endpoint, and return one or all ties at the
 minimum positive hop count. Neo4j lowers these to `shortestPath(...)` and
-`allShortestPaths(...)`; in-memory performs the equivalent expansion-time selection. AGE declines
-the capability because its supported openCypher subset does not preserve these semantics.
+`allShortestPaths(...)`; in-memory performs the equivalent expansion-time selection. Apache AGE
+1.8.0 lowers them to the native `ag_catalog.age_shortest_path` / `ag_catalog.age_all_shortest_paths`
+set-returning functions, because AGE still rejects the Cypher pattern syntax. AGE 1.7.0 has neither
+function and declines the capability.
+
+Capabilities may be determined per connected backend version. The AGE harness reports the connected
+store's version-gated capability set: `ShortestPath` is present on 1.8.0 and later and absent on
+1.7.0. `AgeGraphStoreOptions` can force the native shortest-path and predicate features `Enabled`
+(fail clearly on an older server) or `Disabled` (keep the pre-1.8 behavior on a newer server).
 
 `SetOperations` gates typed and standard-LINQ `Union` plus typed `Concat`. Both operands are planned
 independently with disjoint parameter namespaces. `Union` uses distinct row semantics; `Concat`
@@ -329,8 +336,9 @@ branch through its provider-local lowering pipeline and normalizes the result al
 A provider should decline every capability its native dialect or structured lowering cannot preserve.
 AGE, for example, declares `CallSubqueries` and `PatternSizeProjection` only because its provider-local
 AST pass replaces the unsupported syntax with equivalent grouped matches; it still declines
-`NestedTransactions` and `ShortestPath`. Do not emulate unsupported full-text search with a
-semantically weaker regular-expression query while still declaring `FullTextSearch`.
+`NestedTransactions`, and it declares `ShortestPath` only on servers that expose the native
+shortest-path functions. Do not emulate an unsupported feature with a semantically weaker query
+while still declaring its capability.
 
 Declaring `FullTextSearch` guarantees: case-insensitive, exact-token (whole-word) matching; a multi-term query matches an entity iff ALL terms match, in any order and at any distance; the matched property set is exactly the entity's own `[Property(IncludeInFullTextSearch)]` string properties (string-only by construction; for dynamic entities, all string property values). Text on complex-property value nodes is NOT part of the owning entity's match set. Ranking, stemming, phrase adjacency, prefix/wildcard, and matching beyond the floor are provider-defined: the TCK asserts nothing about them and never asserts a non-match for near-tokens (only for sub-tokens, which must not match). Search result order is unspecified; ordering comes only from explicit `OrderBy`. Providers share one definition of a "term" via `FullTextQueryTokenizer` (split on any non-letter/non-digit, lowercase invariant, drop empties) and each lower it into their own engine syntax; the shared planner keeps the raw query string.
 
@@ -528,7 +536,7 @@ Every optional `GraphCapability` is either certified by a `[RequiresCapability]`
 | `GroupByAggregation` | `IGroupByTests` (all methods) | interface | pass | pass | pass |
 | `NestedTransactions` | _record only_ | — | — | — | — |
 | `RelationshipPredicates` | `IQueryTraversalTests.VariableTraversal_RelationshipPredicateFiltersEveryExpandedHop`, `IQueryTraversalTests.WhereHasRelationship_RespectsDirectionPredicateAndSelfRelationships` | method | pass | pass | pass |
-| `ShortestPath` | `IQueryTraversalTests.ShortestPaths_PinSelectionEndpointDirectionNoPathAndSameNodeSemantics` | method | pass | pass | skip |
+| `ShortestPath` | `IQueryTraversalTests.ShortestPaths_PinSelectionEndpointDirectionNoPathAndSameNodeSemantics` | method | pass | pass | pass (1.8) / skip (1.7) |
 | `SetOperations` | `IQueryTraversalTests.TypedUnionAndConcat_PinDistinctBagAndScalarProjectionSemantics` | method | pass | pass | pass |
 | `NullElementsInSimpleCollections` | `IBasicTests` and `IGraphCommandTests` null-bearing collection cases | method | pass | pass | pass |
 

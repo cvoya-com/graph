@@ -5,6 +5,7 @@ namespace Cvoya.Graph.Age.Querying.Cypher.Visitors.Core;
 
 using System.Linq.Expressions;
 using Cvoya.Graph.Age.Querying.Cypher.Lowering;
+using Cvoya.Graph.Age.Querying.Cypher.Planning;
 using Cvoya.Graph.Cypher;
 using Cvoya.Graph.Cypher.Ast;
 using Cvoya.Graph.Cypher.Planning;
@@ -24,6 +25,8 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
     ]);
 
     private readonly Type _rootType;
+    private readonly AgeDialect _dialect;
+    private readonly string _graphName;
     private readonly ILogger<CypherQueryVisitor>? _logger;
     private readonly bool _hasComplexProperties;
 
@@ -31,8 +34,21 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         Type type,
         ILoggerFactory? loggerFactory = null,
         bool hasComplexProperties = true)
+        : this(type, AgeDialect.Instance, "cvoya_graph", loggerFactory, hasComplexProperties)
+    {
+    }
+
+    public CypherQueryVisitor(
+        Type type,
+        AgeDialect dialect,
+        string graphName,
+        ILoggerFactory? loggerFactory = null,
+        bool hasComplexProperties = true)
     {
         _rootType = type ?? throw new ArgumentNullException(nameof(type));
+        _dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
+        ArgumentException.ThrowIfNullOrWhiteSpace(graphName);
+        _graphName = graphName;
         _logger = loggerFactory?.CreateLogger<CypherQueryVisitor>();
         _hasComplexProperties = hasComplexProperties;
     }
@@ -78,9 +94,17 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
         var sumUnionCountBranches = false;
         try
         {
-            WholeEntityOrderingValidator.Validate(node, AgeDialect.Instance);
+            WholeEntityOrderingValidator.Validate(node, _dialect);
             var model = GraphQueryModelBuilder.Build(node);
-            statement = new CypherQueryPlanner(AgeDialect.PlanningInstance).Plan(model);
+            if (_dialect.SupportsNativeShortestPath && AgeNativeShortestPathPlanner.IsShortestPath(model))
+            {
+                statement = new AgeNativeShortestPathPlanner(_dialect, _graphName).Plan(model);
+            }
+            else
+            {
+                statement = new CypherQueryPlanner(_dialect.Planning).Plan(model);
+            }
+
             statement = LowerStatement(statement, _hasComplexProperties);
             sumUnionCountBranches = model.Terminal == TerminalOperation.Count &&
                 IsUnionOfGlobalCounts(statement.Clauses);
@@ -90,7 +114,7 @@ internal sealed class CypherQueryVisitor : ExpressionVisitor
             throw PreserveProviderException(exception);
         }
 
-        var rendered = new CypherRenderer(AgeDialect.Instance).Render(statement);
+        var rendered = new CypherRenderer(_dialect).Render(statement);
         var projectionColumns = rendered.ProjectionColumns
             .Select(AgeEntityProjectionPass.NormalizeProjectionColumn)
             .ToArray();

@@ -12,7 +12,8 @@ using Cvoya.Graph.Cypher;
 /// Lowers full-text search out of the LINQ expression tree before the shared Cypher pipeline runs.
 /// AGE cannot express full-text in its Cypher subset, so each <c>Search(source, query)</c> call is
 /// replaced by an equivalent private native-identity predicate. The shared Cypher planner lowers
-/// that marker to <c>id(alias) IN $graphIds</c>; no public entity property participates in correlation.
+/// that marker to an AGE-safe native-identity membership test; no public entity property
+/// participates in correlation.
 /// </summary>
 /// <remarks>
 /// Placement matters: phase 1 is an async database call and the Cypher visitor is synchronous, so the

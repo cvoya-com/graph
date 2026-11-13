@@ -319,16 +319,20 @@ jobs:
           USE_NEO4J_CONTAINERS: false
 
   test-age:
-    name: Test Apache AGE Provider
+    name: Test Apache AGE Provider (AGE ${{ matrix.age }})
     runs-on: ubuntu-latest
     needs: resolve-version
     timeout-minutes: 20
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        age: ['1.7.0', '1.8.0']
 
     services:
       age:
-        image: apache/age:release_PG18_1.7.0
+        image: apache/age:release_PG18_${{ matrix.age }}
         ports:
           - 5432:5432
         env:
