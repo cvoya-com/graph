@@ -217,10 +217,10 @@ internal static class GraphValueConverter
         }
 
         var resolved = Type.GetType(typeName);
-        if (resolved != null && !resolved.Assembly.IsCollectible)
+        if (resolved != null && !resolved.IsCollectible)
         {
-            // A collectible type must not be retained by a process-wide cache; it would keep its
-            // AssemblyLoadContext alive and defeat runtime unload.
+            // IsCollectible also covers a permanent generic definition whose arguments come from
+            // a collectible context. Retaining that constructed type would prevent unload.
             ResolvedMetadataTypes.TryAdd(typeName, resolved);
         }
 

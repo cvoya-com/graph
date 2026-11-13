@@ -1144,7 +1144,7 @@ public sealed class GraphResultProcessor
         Type actualType,
         IReadOnlyList<string> labels)
     {
-        var labelsProperty = actualType.Assembly.IsCollectible
+        var labelsProperty = actualType.IsCollectible
             ? actualType.GetProperty(nameof(Graph.INode.Labels))
             : LabelsProperties.GetOrAdd(
                 actualType,
@@ -1331,7 +1331,9 @@ public sealed class GraphResultProcessor
         if (cache.TryGetValue(targetType, out var cached) && cached.Version == version)
             return cached.ByLabel;
 
-        LabelIndexBuildsForTests.AddOrUpdate(targetType, 1, static (_, count) => count + 1);
+        // Test instrumentation must obey the same lifetime boundary as the cache it measures.
+        if (!targetType.IsCollectible)
+            LabelIndexBuildsForTests.AddOrUpdate(targetType, 1, static (_, count) => count + 1);
         var byLabel = BuildLabelIndex(targetType, relationships);
 
         // Never retain types from a collectible AssemblyLoadContext: the cache would keep that
