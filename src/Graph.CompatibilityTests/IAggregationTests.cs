@@ -22,6 +22,41 @@ public interface IAggregationTests : IGraphTest
         public Guid TrackingId { get; set; }
     }
 
+    /// <summary>Certifies synchronous terminals across hierarchy, duplicate elimination and paging.</summary>
+    [Fact]
+    public async Task SynchronousCounts_RespectHierarchyDistinctAndPaging()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var marker = $"sync-count-{Guid.NewGuid():N}";
+        Person[] people =
+        [
+            new Person { FirstName = marker, Age = 10 },
+            new Person { FirstName = marker, Age = 10 },
+            new Person { FirstName = marker, Age = 20 },
+            new Manager { FirstName = marker, Age = 20 },
+            new Manager { FirstName = marker, Age = 30 },
+        ];
+        foreach (var person in people)
+        {
+            await Graph.CreateNodeAsync(person, null, ct);
+        }
+
+        var source = Graph.Nodes<Person>().Where(person => person.FirstName == marker);
+        Assert.Equal(5, Queryable.Count(source));
+        Assert.Equal(5L, Queryable.LongCount(source));
+        Assert.Equal(3, Queryable.Count(source, person => person.Age >= 20));
+        Assert.Equal(3L, Queryable.LongCount(source, person => person.Age >= 20));
+
+        var distinct = source.Select(person => person.Age).Distinct();
+        Assert.Equal(3, Queryable.Count(distinct));
+        Assert.Equal(3L, Queryable.LongCount(distinct));
+        var page = source.OrderBy(person => person.Age).ThenBy(person => person.TestKey).Skip(1).Take(2);
+        Assert.Equal(2, Queryable.Count(page));
+        Assert.Equal(2L, Queryable.LongCount(page));
+        Assert.Equal(0, Queryable.Count(source, person => person.Age < 0));
+        Assert.Equal(0L, Queryable.LongCount(source, person => person.Age < 0));
+    }
+
     [Fact]
     public async Task CanCountDistinctQuery()
     {

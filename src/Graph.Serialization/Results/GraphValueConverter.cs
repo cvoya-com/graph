@@ -5,6 +5,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.Loader;
 
 namespace Cvoya.Graph.Serialization.Results;
 
@@ -13,9 +14,9 @@ internal static class GraphValueConverter
     internal const string MetadataPropertyName = "__metadata__";
     private const string TypeNameKey = "type";
 
-    // Successful metadata resolutions are stable for the life of the process: a Type that
-    // Type.GetType already resolved cannot become a different Type after another assembly loads.
-    // Cache only successes so an unresolved name can still resolve after a later assembly load.
+    // Successful metadata resolutions in the default reflection context remain stable after
+    // another assembly loads. Cache only successes so a missing name can resolve after a later load;
+    // non-default contextual reflection must resolve independently of these process-wide entries.
     private static readonly ConcurrentDictionary<string, Type> ResolvedMetadataTypes = new(StringComparer.Ordinal);
 
     public static object? ConvertTo(object? value, Type targetType)
@@ -211,16 +212,24 @@ internal static class GraphValueConverter
             return null;
         }
 
+        // The same assembly-qualified name can identify a different Type in another context.
+        // Such a resolution must neither consume nor populate the default-context success cache.
+        if (AssemblyLoadContext.CurrentContextualReflectionContext is { } context &&
+            context != AssemblyLoadContext.Default)
+        {
+            return Type.GetType(typeName);
+        }
+
         if (ResolvedMetadataTypes.TryGetValue(typeName, out var cached))
         {
             return cached;
         }
 
         var resolved = Type.GetType(typeName);
-        if (resolved != null && !resolved.Assembly.IsCollectible)
+        if (resolved != null && !resolved.IsCollectible)
         {
-            // A collectible type must not be retained by a process-wide cache; it would keep its
-            // AssemblyLoadContext alive and defeat runtime unload.
+            // IsCollectible also covers a permanent generic definition whose arguments come from
+            // a collectible context. Retaining that constructed type would prevent unload.
             ResolvedMetadataTypes.TryAdd(typeName, resolved);
         }
 

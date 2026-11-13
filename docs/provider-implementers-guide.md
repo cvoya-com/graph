@@ -313,6 +313,15 @@ any other result map. A backend that cannot persist a map-valued entity property
 assembly-qualified name as a scalar under the same reserved property; the materializer accepts both
 forms.
 
+The shared result processor caches successful metadata resolutions only in the default reflection
+context. A non-default contextual reflection scope resolves the name independently, since the same
+assembly identity can denote a different CLR type in another load context. Missing names are not
+cached, so a later assembly load can make them resolvable. Result-discovery caches and their
+instrumentation must not retain collectible types, including constructed generic types with
+collectible arguments. Assembly-load generations and their discovered type arrays are published as
+one snapshot. These are result-cache guarantees; a host must separately release its entity,
+serializer and schema references before expecting an entire plugin to unload.
+
 Relationship updates must treat the authoritative storage/logical type and exact concrete CLR type
 as immutable identity. Compare both before replacing any properties, and keep the comparison in the
 same guarded mutation as the write (or repeat it in the write predicate after a lookup). A failed

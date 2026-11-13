@@ -940,6 +940,49 @@ public interface IGraphCommandTests : IGraphTest
             cancellationToken: TestContext.Current.CancellationToken);
     }
 
+    /// <summary>Certifies atomic preflight and exact cascade counts for overlapping incident edges.</summary>
+    [Fact]
+    public async Task SetBasedNodeDelete_PreflightsSelfLoopsAndEdgesBetweenSelectedNodes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var marker = $"overlap-delete-{Guid.NewGuid():N}";
+        var first = new Person { FirstName = "first", LastName = marker };
+        var second = new Person { FirstName = "second", LastName = marker };
+        var outside = new Person { FirstName = "outside" };
+        foreach (var person in new[] { first, second, outside })
+        {
+            await Graph.CreateNodeAsync(person, null, ct);
+        }
+
+        var selfLoop = new Knows();
+        var selectedEdge = new Knows();
+        var incoming = new Knows();
+        var outsideLoop = new Knows();
+        await Graph.ConnectAsync(first, selfLoop, first, cancellationToken: ct);
+        await Graph.ConnectAsync(first, selectedEdge, second, cancellationToken: ct);
+        await Graph.ConnectAsync(outside, incoming, second, cancellationToken: ct);
+        await Graph.ConnectAsync(outside, outsideLoop, outside, cancellationToken: ct);
+        var targets = Graph.Nodes<Person>().Where(person => person.LastName == marker);
+
+        await Assert.ThrowsAsync<GraphException>(() => GraphCommandExtensions.DeleteAsync(
+            targets, cascadeDelete: false, ct));
+        Assert.Equal(2, await targets.CountAsync(ct));
+        foreach (var relationship in new[] { selfLoop, selectedEdge, incoming, outsideLoop })
+        {
+            _ = await Graph.FindRelationshipByTestKeyAsync<Knows>(relationship.TestKey, null, ct);
+        }
+
+        Assert.Equal(2, await GraphCommandExtensions.DeleteAsync(targets, cascadeDelete: true, ct));
+        Assert.Equal(0, await targets.CountAsync(ct));
+        foreach (var relationship in new[] { selfLoop, selectedEdge, incoming })
+        {
+            Assert.Null(await Graph.RelationshipsByTestKey<Knows>(relationship.TestKey).SingleOrDefaultAsync(ct));
+        }
+
+        _ = await Graph.FindNodeByTestKeyAsync<Person>(outside.TestKey, null, ct);
+        _ = await Graph.FindRelationshipByTestKeyAsync<Knows>(outsideLoop.TestKey, null, ct);
+    }
+
     [Fact]
     public async Task ExactOneEndpointSelection_ThrowsRoleSpecificCardinalityFailures()
     {
