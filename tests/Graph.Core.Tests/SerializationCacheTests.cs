@@ -34,6 +34,37 @@ public class SerializationCacheTests
         SerializationCacheFixtureAssembly.AssertUnloaded(contextReference);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void MetadataResolution_RespectsContextAfterDefaultCacheWarmup(bool wireEntries, bool mapMetadata)
+    {
+        var fixture = SerializationCacheFixtureAssembly.Compile("public sealed class ContextualPayload;");
+        using var defaultScope = AssemblyLoadContext.Default.EnterContextualReflection();
+        using var stream = new MemoryStream(fixture.Image);
+        var defaultAssembly = AssemblyLoadContext.Default.LoadFromStream(stream);
+        var defaultType = defaultAssembly.GetType("ContextualPayload", throwOnError: true)!;
+        var typeName = defaultType.AssemblyQualifiedName!;
+        Assert.Same(defaultType, ResolveMetadata(typeName, wireEntries, mapMetadata));
+
+        var contextReference = SerializationCacheFixtureAssembly.LoadAndRun(fixture.Image, (context, assembly) =>
+        {
+            var expected = assembly.GetType("ContextualPayload", throwOnError: true)!;
+            using var scope = context.EnterContextualReflection();
+            Assert.NotSame(defaultType, expected);
+            Assert.Same(expected, Type.GetType(typeName));
+            for (var pass = 0; pass < 3; pass++)
+            {
+                Assert.Same(expected, ResolveMetadata(typeName, wireEntries, mapMetadata));
+            }
+        });
+
+        SerializationCacheFixtureAssembly.AssertUnloaded(contextReference);
+        Assert.Same(defaultType, ResolveMetadata(typeName, wireEntries, mapMetadata));
+    }
+
     [Fact]
     public void NodeProcessing_DoesNotRetainCollectibleGenericArguments()
     {

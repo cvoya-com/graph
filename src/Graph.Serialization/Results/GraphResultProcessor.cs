@@ -28,8 +28,7 @@ public sealed class GraphResultProcessor
     private static readonly ConcurrentDictionary<Type, PropertyInfo?> LabelsProperties = new();
     private static readonly ConcurrentDictionary<Type, int> LabelIndexBuildsForTests = new();
     private static long _assemblyVersion;
-    private static Type[]? _knownConcreteTypes;
-    private static long _knownConcreteTypesVersion = -1;
+    private static ConcreteTypesSnapshot? _knownConcreteTypes;
 
     static GraphResultProcessor()
     {
@@ -38,6 +37,7 @@ public sealed class GraphResultProcessor
     }
 
     private sealed record LabelIndex(long Version, Dictionary<string, Type> ByLabel);
+    private sealed record ConcreteTypesSnapshot(long Version, Type[] Types);
 
     private static readonly List<ComplexProperty> NoComplexProperties = [];
 
@@ -1405,17 +1405,18 @@ public sealed class GraphResultProcessor
         // changes the version and forces a rebuild on the next call instead of pinning a partial scan.
         var version = Volatile.Read(ref _assemblyVersion);
         var assemblies = AppDomain.CurrentDomain.GetAssemblies();
-        if (Volatile.Read(ref _knownConcreteTypesVersion) == version &&
-            Volatile.Read(ref _knownConcreteTypes) is { } cached)
+        var cached = Volatile.Read(ref _knownConcreteTypes);
+        if (cached is not null && cached.Version == version)
         {
-            return cached;
+            return cached.Types;
         }
 
         var types = ScanConcreteTypes(assemblies);
         if (AreAllAssembliesCacheable(assemblies))
         {
-            Volatile.Write(ref _knownConcreteTypesVersion, version);
-            Volatile.Write(ref _knownConcreteTypes, types);
+            // Publish the generation and its types together so a reader cannot pair a new
+            // generation with the previous scan and cache an incomplete label map indefinitely.
+            Volatile.Write(ref _knownConcreteTypes, new ConcreteTypesSnapshot(version, types));
         }
 
         return types;
