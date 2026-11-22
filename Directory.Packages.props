@@ -18,11 +18,11 @@
         <PackageVersion Include="Cvoya.Graph.Neo4j" Version="$(Version)" />
         <PackageVersion Include="Cvoya.Graph.Serialization" Version="$(Version)" />
         <PackageVersion Include="Cvoya.Graph.Serialization.CodeGen" Version="$(Version)" />
-        <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="5.12.0" />
-        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.12.0" />
+        <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="5.9.0" />
+        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Analyzer.Testing.XUnit" Version="1.1.2" />
         <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.CodeFix.Testing.XUnit" Version="1.1.2" />
-        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.12.0" />
+        <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.9.0" />
         <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="11.0.0" />
         <PackageVersion Include="Microsoft.Extensions.Logging" Version="11.0.0" />
         <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="11.0.0" />
