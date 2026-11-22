@@ -22,7 +22,8 @@
         <LangVersion>14.0</LangVersion>
         <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
         <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
-        <WarningsAsErrors>$(WarningsAsErrors);Nullable;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+        <!-- An incompatible Roslyn assembly can silently disable analyzers and source generators. -->
+        <WarningsAsErrors>$(WarningsAsErrors);Nullable;CS9057;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
         <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
 
         <!-- Build settings -->
