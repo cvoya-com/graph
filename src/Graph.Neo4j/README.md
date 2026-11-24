@@ -47,6 +47,9 @@ an operation needs to select an entity. Keyless entities remain valid.
 Ordinary read-only query execution does not initialize schema or create indexes. Write paths
 initialize the schema artifacts required by the registered model.
 
+The Neo4j provider stores `decimal` properties as double-precision values. Reading them back as
+`decimal` rounds to 15 significant digits on both .NET 10 and .NET 11.
+
 ## 🏗️ Architecture
 
 This provider implements:

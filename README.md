@@ -85,6 +85,8 @@ not provider identity or an implicit mutation target.
 
 ## Packages
 
+CVOYA Graph runtime packages include assets for .NET 10 and .NET 11.
+
 The inventory below covers every packable project under `src/`. Package validation derives the
 expected set from those projects with [`scripts/verify-package-set.sh`](scripts/verify-package-set.sh)
 instead of maintaining a second fixed inventory.
@@ -273,7 +275,8 @@ Compiling examples live under [`examples/`](examples/).
 
 ## Build and test
 
-Requires the .NET 10 SDK and C# 14. Provider-backed tests also require their corresponding service.
+Building the repository requires the .NET 11 SDK. Tests run on both .NET 10 and .NET 11, so install
+the .NET 10 runtime as well. Provider-backed tests require their corresponding service.
 
 ```bash
 dotnet build --configuration Debug

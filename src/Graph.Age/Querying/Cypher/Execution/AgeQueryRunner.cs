@@ -1668,7 +1668,7 @@ internal sealed partial class AgeQueryRunner
             !trimmed.Contains("::edge", StringComparison.Ordinal) &&
             !trimmed.Contains("::path", StringComparison.Ordinal))
         {
-            return JsonDocument.Parse(trimmed).RootElement.Clone();
+            return JsonElement.Parse(trimmed);
         }
 
         if (trimmed.StartsWith('{') ||

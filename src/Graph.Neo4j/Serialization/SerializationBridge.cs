@@ -5,6 +5,7 @@ namespace Cvoya.Graph.Neo4j.Serialization;
 
 using System.Collections;
 using System.Globalization;
+using Cvoya.Graph.Serialization.Results;
 using global::Neo4j.Driver;
 
 
@@ -119,7 +120,7 @@ internal static class SerializationBridge
             _ when underlyingType == typeof(ulong) => Convert.ToUInt64(value, CultureInfo.InvariantCulture),
             _ when underlyingType == typeof(float) => Convert.ToSingle(value, CultureInfo.InvariantCulture),
             _ when underlyingType == typeof(double) => Convert.ToDouble(value, CultureInfo.InvariantCulture),
-            _ when underlyingType == typeof(decimal) => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+            _ when underlyingType == typeof(decimal) => GraphValueConverter.ConvertToDecimal(value),
 
             // Temporal conversions
             _ when underlyingType == typeof(DateTime) => ConvertToDateTime(value),

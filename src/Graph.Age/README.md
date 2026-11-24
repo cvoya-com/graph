@@ -187,7 +187,7 @@ From the repository root:
 ```bash
 scripts/containers/start-age.sh
 export AGE_CONNECTION_STRING='Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres'
-dotnet test tests/Graph.Age.Tests/Graph.Age.Tests.csproj --configuration Debug
+./scripts/run-tests.sh --configuration Debug --lane age
 ```
 
 The implementation incorporates and substantially reworks Apache AGE provider ideas from

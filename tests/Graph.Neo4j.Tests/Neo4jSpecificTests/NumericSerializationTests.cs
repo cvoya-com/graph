@@ -219,7 +219,17 @@ public class NumericSerializationTests
         var result = SerializationBridge.FromNeo4jValue(floatValue, typeof(decimal));
 
         // Assert
-        Assert.Equal((decimal)floatValue, (decimal)result);
+        Assert.Equal(123.456m, (decimal)result);
+    }
+
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(float.NegativeInfinity)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(7.922816251426434e28)]
+    public void ConvertFromNeo4jValue_ToDecimal_OutOfRangeThrows(object inputValue)
+    {
+        Assert.Throws<OverflowException>(() => SerializationBridge.FromNeo4jValue(inputValue, typeof(decimal)));
     }
 
     public static IEnumerable<object[]> FloatConversionTestData =>

@@ -39,6 +39,7 @@ Options:
   --lane <fast|neo4j|age|all>   Test lane (default: all)
   --fast                        Alias for --lane fast
   --project <name-or-path>      Run one test project (repeatable)
+  --framework <tfm>             Run one target framework (default: all supported targets)
   --filter <xunit-query>        Apply an xUnit query filter (repeatable, OR)
   --coverage                    Collect Cobertura coverage per test project
   --report-trx                  Write an xUnit TRX report per test project
@@ -74,6 +75,7 @@ EOF
 CONFIGURATION="Debug"
 VERBOSITY="normal"
 LANE="all"
+FRAMEWORK=""
 COLLECT_COVERAGE=false
 REPORT_TRX=false
 RESULTS_DIRECTORY_ROOT=""
@@ -111,6 +113,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --project)
             PROJECT_SELECTORS+=("${2:?--project requires a value}")
+            shift 2
+            ;;
+        --framework)
+            FRAMEWORK="${2:?--framework requires a value}"
             shift 2
             ;;
         --filter)
@@ -403,6 +409,23 @@ if [ "${#SELECTED_PROJECTS[@]}" -eq 0 ]; then
     exit 1
 fi
 
+target_frameworks=$(dotnet msbuild "${SELECTED_PROJECTS[0]}" -nologo -getProperty:GraphRuntimeTargetFrameworks | tr -d '\r')
+if [ -z "$target_frameworks" ]; then
+    print_error "No test target frameworks are configured."
+    exit 1
+fi
+
+if [ -n "$FRAMEWORK" ]; then
+    case ";$target_frameworks;" in
+        *";$FRAMEWORK;"*) target_frameworks="$FRAMEWORK" ;;
+        *)
+            print_error "Unsupported test framework '$FRAMEWORK' (available: $target_frameworks)."
+            exit 64
+            ;;
+    esac
+fi
+IFS=';' read -r -a FRAMEWORKS <<< "$target_frameworks"
+
 if [ "$START_NEO4J" = true ]; then
     print_header "Starting Neo4j"
     ./scripts/containers/start-neo4j.sh
@@ -452,7 +475,8 @@ fi
 
 run_test_project() {
     local project="$1"
-    local slug_suffix="${2:-}"
+    local framework="$2"
+    local slug_suffix="${3:-}"
     local project_name
     local slug
     local log_file
@@ -462,13 +486,12 @@ run_test_project() {
 
     project_name=$(basename "$project" .csproj)
     slug=$(printf '%s' "$project_name" | tr '[:upper:]' '[:lower:]' | tr '.' '-')
-    if [ -n "$slug_suffix" ]; then
-        slug="$slug-$slug_suffix"
-    fi
+    slug="$slug${slug_suffix:+-$slug_suffix}-$framework"
     log_file=$(mktemp "${TMPDIR:-/tmp}/cvoya-test-output.XXXXXX")
     command=(
         dotnet test
         --project "$project"
+        --framework "$framework"
         --configuration "$CONFIGURATION"
         --no-build
         --verbosity "$VERBOSITY"
@@ -504,7 +527,7 @@ run_test_project() {
         command+=(--filter-query "${TEST_FILTERS[@]}")
     fi
 
-    print_header "Testing $project_name${slug_suffix:+ ($slug_suffix)}"
+    print_header "Testing $project_name ($framework${slug_suffix:+, $slug_suffix})"
     if ! "${command[@]}" 2>&1 | tee "$log_file"; then
         rm -f "$log_file"
         return 1
@@ -518,7 +541,7 @@ run_test_project() {
     rm -f "$log_file"
 
     if [ -z "$test_count" ] || [ "$test_count" -eq 0 ]; then
-        print_error "$project completed without reporting a nonzero test count."
+        print_error "$project ($framework) completed without reporting a nonzero test count."
         return 1
     fi
 
@@ -529,6 +552,24 @@ run_test_project() {
 SELECTED_PROJECT_COUNT=0
 SELECTED_TEST_COUNT=0
 TEST_FAILURE=false
+
+run_test_project_for_frameworks() {
+    local project="$1"
+    local slug_suffix="${2:-}"
+    local framework
+    local failed=false
+
+    for framework in "${FRAMEWORKS[@]}"; do
+        if ! run_test_project "$project" "$framework" "$slug_suffix"; then
+            failed=true
+            if [ "$KEEP_GOING" = false ]; then
+                return 1
+            fi
+        fi
+    done
+
+    [ "$failed" = false ]
+}
 
 run_age_project_for_versions() {
     local project="$1"
@@ -541,7 +582,7 @@ run_age_project_for_versions() {
         AGE_CONNECTION_STRING=$(age_connection_string_for "$version")
         version_slug=$(printf '%s' "$version" | tr '.' '-')
         print_status "AGE $version connection: $(age_describe_connection "$version") (credentials are never logged)"
-        if ! run_test_project "$project" "age-$version_slug"; then
+        if ! run_test_project_for_frameworks "$project" "age-$version_slug"; then
             failed=true
             if [ "$KEEP_GOING" = false ]; then
                 return 1
@@ -563,7 +604,7 @@ for project in "${SELECTED_PROJECTS[@]}"; do
         fi
         continue
     fi
-    if ! run_test_project "$project"; then
+    if ! run_test_project_for_frameworks "$project"; then
         TEST_FAILURE=true
         if [ "$KEEP_GOING" = false ]; then
             exit 1
@@ -582,7 +623,7 @@ if [ "$RUN_PERFORMANCE" = true ]; then
 fi
 
 print_header "Test lane completed"
-print_status "$SELECTED_PROJECT_COUNT project(s), $SELECTED_TEST_COUNT test(s)"
+print_status "$SELECTED_PROJECT_COUNT project/framework run(s), $SELECTED_TEST_COUNT test(s)"
 
 if [ "$COLLECT_COVERAGE" = true ]; then
     print_status "Coverage reports: ${RESULTS_DIRECTORY_ROOT:-coverage}/"

@@ -38,7 +38,7 @@ public sealed class GraphResultMaterializer
         _logger.LogDebugGraphResultMaterializer38(targetType.Name, elementType.Name, isCollectionType, records.Count);
 
         // Handle empty results consistently
-        if (!records.Any())
+        if (records.Count == 0)
         {
             return isCollectionType
                 ? ConvertToCollectionType<T>([], elementType)
