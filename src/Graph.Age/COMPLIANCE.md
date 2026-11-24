@@ -272,13 +272,13 @@ compatibility method inventory.
 
 ## Reproduction
 
-Start the repository-pinned providers. `start-age.sh` starts AGE 1.7.0 on port 5455 and AGE 1.8.0
-on port 5456, so the AGE suite can run against both released versions:
+Start the repository-pinned providers. `start-age.sh` defaults to AGE 1.8.0 on port 5456.
+Use `all` to start both AGE versions, including AGE 1.7.0 on port 5455.
 
 ```bash
 ./scripts/containers/start-neo4j.sh
 ./scripts/containers/start-age.sh all   # or: 1.7 | 1.8 to start a single version
-export AGE_CONNECTION_STRING='Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres'
+export AGE_CONNECTION_STRING='Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres'
 ```
 
 Run the AGE provider suite against both AGE versions in one pass (`--age-versions` maps 1.7 to

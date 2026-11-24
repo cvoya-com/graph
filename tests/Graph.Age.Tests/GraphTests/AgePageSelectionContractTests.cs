@@ -26,7 +26,7 @@ public sealed class AgePageSelectionContractTests(AgeGraphCleanupFixture graphCl
     private const string UnicodeAggLabel = "Nul97ÜnïcodeAggContract";
 
     private static readonly string ConnectionString = Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
-        ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        ?? "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     static AgePageSelectionContractTests()
     {

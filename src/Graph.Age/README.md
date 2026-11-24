@@ -24,7 +24,7 @@ using Cvoya.Graph;
 using Cvoya.Graph.Age;
 
 await using var store = new AgeGraphStore(
-    "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
+    "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres",
     graphName: "my_graph");
 
 await store.CreateGraphIfNotExistsAsync();
@@ -182,11 +182,11 @@ gate are documented in the performance guide (`docs/performance.md`).
 
 ## Local AGE
 
-From the repository root:
+The default local fixture runs AGE 1.8.0 on port 5456. From the repository root:
 
 ```bash
 scripts/containers/start-age.sh
-export AGE_CONNECTION_STRING='Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres'
+export AGE_CONNECTION_STRING='Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres'
 ./scripts/run-tests.sh --configuration Debug --lane age
 ```
 

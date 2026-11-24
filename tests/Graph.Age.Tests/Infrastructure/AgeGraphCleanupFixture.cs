@@ -18,7 +18,7 @@ using Npgsql.Age;
 public sealed class AgeGraphCleanupFixture : IAsyncDisposable
 {
     private const string DefaultConnectionString =
-        "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     private readonly Dictionary<string, bool> graphs = new(StringComparer.Ordinal);
     private readonly object sync = new();

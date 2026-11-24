@@ -15,7 +15,7 @@ public sealed class AgeHarness(AgeGraphCleanupFixture graphCleanup) : IGraphProv
 {
     private readonly List<AgeGraphStore> stores = [];
     private readonly string connectionString = Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
-        ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        ?? "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
     private NpgsqlDataSource? dataSource;
     private CapabilitySet capabilities = AgeDialect.Instance.Capabilities;
 

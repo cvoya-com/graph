@@ -10,8 +10,8 @@ usage() {
 Usage: ./scripts/containers/start-age.sh [command]
 
 Commands:
-  1.7 (default)   Start Apache AGE 1.7.0 as 'cvoya-age' on host port 5455
-  1.8             Start Apache AGE 1.8.0 as 'cvoya-age18' on host port 5456
+  1.8 (default)   Start Apache AGE 1.8.0 as 'cvoya-age18' on host port 5456
+  1.7             Start Apache AGE 1.7.0 as 'cvoya-age' on host port 5455
   all             Start both AGE versions
   stop [1.7|1.8|all]   Remove the selected containers (default: all)
 
@@ -109,7 +109,7 @@ stop_all() {
     stop_age "$age17_name"
 }
 
-case "${1:-1.7}" in
+case "${1:-1.8}" in
     1.7|1.7.*)
         start_age "1.7.0" "$age17_image" "$age17_name" "$age17_port"
         ;;

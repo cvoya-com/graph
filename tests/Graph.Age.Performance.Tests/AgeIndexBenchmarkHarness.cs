@@ -34,7 +34,7 @@ internal static class AgeIndexBenchmarkHarness
     private const string OpenDocumentChildLabel = "NgenOpenDocumentChild";
     private const string LookupLabel = "NgenLookup";
     private const string DefaultConnectionString =
-        "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 

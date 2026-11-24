@@ -8,14 +8,14 @@ scenarios share one seeded graph and need a before/after comparison on the same 
 
 Requirements:
 
-- Apache AGE with the graph provider on `AGE_CONNECTION_STRING` (default `localhost:5455`, database
+- Apache AGE with the graph provider on `AGE_CONNECTION_STRING` (default `localhost:5456`, database
   `postgres`, user/password `postgres`).
 - Enough disk/time for the requested node count; the default is 30,000 nodes.
 
 Run:
 
 ```bash
-AGE_CONNECTION_STRING='Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres' \
+AGE_CONNECTION_STRING='Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres' \
   dotnet run --project tests/Graph.Age.Performance.Tests -c Release -- \
   --age-index-harness --nodes 30000 --iterations 10 --warmups 3 --output benchmarks
 ```

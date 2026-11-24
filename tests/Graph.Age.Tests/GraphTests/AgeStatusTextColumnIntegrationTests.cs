@@ -21,7 +21,7 @@ public sealed class AgeStatusTextColumnIntegrationTests(AgeGraphCleanupFixture g
     private static readonly string StatusIndex = AgePhysicalName.TextIndex(Label, "Status");
 
     private static readonly string ConnectionString = Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
-        ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        ?? "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     [Fact]
     public async Task ApplyFastPathUpdateDeleteAndRevertRoundTrip()

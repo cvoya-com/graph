@@ -20,7 +20,7 @@ public sealed class AgeNativeIdVersionProbeTests
 {
     private static readonly string ConnectionString =
         Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
-        ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        ?? "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     [Fact]
     public async Task ExtensionCreatedAfterFirstOpen_IsDetectedOnANextConnection()
