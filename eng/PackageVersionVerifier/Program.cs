@@ -13,6 +13,7 @@ internal static class Program
 {
     private const string InformationalVersionAttribute = "System.Reflection.AssemblyInformationalVersionAttribute";
     private const string FileVersionAttribute = "System.Reflection.AssemblyFileVersionAttribute";
+    private static readonly string[] RuntimeFrameworks = ["net10.0", "net11.0"];
 
     public static int Main(string[] args)
     {
@@ -120,6 +121,20 @@ internal static class Program
             {
                 errors.Add($"{packageName}: package contains no Cvoya.Graph*.dll assembly to verify.");
                 return;
+            }
+
+            // Analyzer-only packages put their own assembly under analyzers/, while
+            // runtime packages may bundle a different assembly there as a generator.
+            if (archive.GetEntry($"analyzers/dotnet/cs/{packageId}.dll") is null)
+            {
+                foreach (string framework in RuntimeFrameworks)
+                {
+                    string assetPath = $"lib/{framework}/{packageId}.dll";
+                    if (archive.GetEntry(assetPath) is null)
+                    {
+                        errors.Add($"{packageName}: missing runtime assembly {assetPath}.");
+                    }
+                }
             }
 
             foreach (ZipArchiveEntry assembly in assemblies)

@@ -92,6 +92,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -123,6 +124,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -171,6 +173,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -205,6 +208,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -239,6 +243,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -290,6 +295,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -310,7 +316,7 @@ jobs:
         run: dotnet build --no-restore --configuration Release
 
       - name: Test Neo4j Provider
-        run: dotnet test --project tests/Graph.Neo4j.Tests/Graph.Neo4j.Tests.csproj --no-build --configuration Release --verbosity normal
+        run: dotnet test --project tests/Graph.Neo4j.Tests/Graph.Neo4j.Tests.csproj --max-parallel-test-modules 1 --no-build --configuration Release --verbosity normal
         env:
           GRAPHMODEL_COMPLIANCE_STRICT: "1"
           NEO4J_URI: bolt://localhost:7687
@@ -354,6 +360,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -369,7 +376,7 @@ jobs:
         run: dotnet build --no-restore --configuration Release
 
       - name: Test Apache AGE Provider
-        run: dotnet test --project tests/Graph.Age.Tests/Graph.Age.Tests.csproj --no-build --configuration Release --verbosity normal
+        run: dotnet test --project tests/Graph.Age.Tests/Graph.Age.Tests.csproj --max-parallel-test-modules 1 --no-build --configuration Release --verbosity normal
         env:
           AGE_CONNECTION_STRING: Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=postgres
           GRAPHMODEL_COMPLIANCE_STRICT: "1"
@@ -410,6 +417,7 @@ jobs:
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: "10.0.x"
+          global-json-file: global.json
           cache: false
           cache-dependency-path: |
             **/*.csproj
@@ -452,6 +460,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf ./consumer-packages
+          export ValidatePackageConsumer=true
           dotnet restore examples/SimpleMovieExample/SimpleMovieExample.csproj \
             --force \
             --no-cache \

@@ -1,11 +1,11 @@
 # Contributing to CVOYA Graph
 
-Thank you for contributing. CVOYA Graph targets .NET 10 and C# 14 and accepts changes through pull
-requests.
+Thank you for contributing. CVOYA Graph targets .NET 10 and .NET 11 with C# 14 and accepts changes
+through pull requests.
 
 ## Prerequisites
 
-- .NET 10 SDK
+- .NET 11 SDK and .NET 10 runtime
 - Git
 - Podman or Docker for Neo4j/Apache AGE provider tests
 - Bash and `jq` for package validation
@@ -27,7 +27,8 @@ Use a focused branch and conventional commit messages such as `feat:`, `fix:`, `
 ## Test lanes
 
 Use the discovering repository runner. It builds once, finds test projects under `tests/`, excludes
-benchmarks, and rejects any selected project that reports zero tests.
+benchmarks, and runs each selected project on .NET 10 and .NET 11. It rejects a run that reports
+zero tests.
 
 ```bash
 # Service-free projects and the in-memory provider contract suite
@@ -54,6 +55,7 @@ During iteration, select the narrowest project/filter:
   --configuration Debug \
   --lane fast \
   --project Graph.Core.Tests \
+  --framework net11.0 \
   --filter '/*/*/SchemaRegistry*'
 ```
 
@@ -151,7 +153,8 @@ source XML or compiling examples should build the affected project/examples.
 ## Package changes
 
 Package validation derives the expected inventory from packable projects under `src/`, verifies
-missing/unexpected packages and assembly version metadata, then builds with package references:
+missing or unexpected packages, runtime assets, and assembly version metadata, then builds with
+package references:
 
 ```bash
 dotnet msbuild eng/PackageValidation.proj -target:Validate

@@ -87,6 +87,8 @@ internal static class GraphValueConverter
             return value.ToString();
         if (underlyingType == typeof(char))
             return System.Convert.ToChar(value, CultureInfo.InvariantCulture);
+        if (underlyingType == typeof(decimal))
+            return ConvertToDecimal(value);
         if (underlyingType.IsEnum)
         {
             return value is string text
@@ -161,6 +163,37 @@ internal static class GraphValueConverter
 
         return System.Convert.ChangeType(value, underlyingType, CultureInfo.InvariantCulture);
     }
+
+    internal static decimal ConvertToDecimal(object value)
+    {
+#if NET11_0_OR_GREATER
+        // Keep .NET 10 precision for provider values read as decimal.
+        return value switch
+        {
+            float single => RoundFloatingPointToDecimal(single, "G7"),
+            double number => RoundFloatingPointToDecimal(number, "G15"),
+            _ => System.Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+        };
+#else
+        return System.Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+#endif
+    }
+
+#if NET11_0_OR_GREATER
+    private static decimal RoundFloatingPointToDecimal(double value, string format)
+    {
+        if (!double.IsFinite(value) || Math.Abs(value) >= (double)decimal.MaxValue)
+        {
+            // Preserve the conversion's OverflowException, including for non-finite input.
+            return System.Convert.ToDecimal(value);
+        }
+
+        // The supported formats fit in 32 characters including sign and exponent.
+        Span<char> buffer = stackalloc char[32];
+        value.TryFormat(buffer, out var length, format, CultureInfo.InvariantCulture);
+        return decimal.Parse(buffer[..length], NumberStyles.Float, CultureInfo.InvariantCulture);
+    }
+#endif
 
     public static Type? GetTypeFromMetadata(IReadOnlyDictionary<string, object>? properties)
     {

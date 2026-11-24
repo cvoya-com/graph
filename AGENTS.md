@@ -1,6 +1,6 @@
 # CVOYA graph — project instructions
 
-CVOYA graph is an Apache-2.0 type-safe .NET library for graph data and graph databases. It targets .NET 10/C# 14 and ships provider-neutral querying, Neo4j, PostgreSQL + Apache AGE, an in-memory reference provider, analyzers, serialization/code generation, and a provider compatibility suite.
+CVOYA graph is an Apache-2.0 type-safe .NET library for graph data and graph databases. It targets .NET 10 and .NET 11 with C# 14 and ships provider-neutral querying, Neo4j, PostgreSQL + Apache AGE, an in-memory reference provider, analyzers, serialization/code generation, and a provider compatibility suite.
 
 Tool-specific configuration lives in `.claude/` and `.codex/`; [docs/ai-agents.md](docs/ai-agents.md) maps the surfaces.
 

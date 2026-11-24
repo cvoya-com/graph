@@ -219,7 +219,8 @@ push.
   the standard SDK contract and builds before packing; only an explicit
   `--no-build` reuses earlier output. The release workflow deliberately builds
   once and then packs with `--no-build`, while the package verifier checks the
-  DLL metadata so stale or mismatched output cannot publish.
+  DLL metadata so stale or mismatched output cannot publish. The release build also restores
+  and compiles the package consumer for .NET 10 and .NET 11.
 - **No `CHANGELOG.md`.** A reviewed version-specific introduction under
   `developer/release-notes/` is used when present, with a short CVOYA-branded
   fallback for other tags. The introduction is prepended to GitHub's

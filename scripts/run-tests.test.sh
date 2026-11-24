@@ -43,7 +43,9 @@ printf '%q ' "$@" >> "$CALLS_FILE"
 printf '\n' >> "$CALLS_FILE"
 
 if [ "${1:-}" = "--version" ]; then
-    echo "10.0.100"
+    echo "11.0.100"
+elif [ "${1:-}" = "msbuild" ]; then
+    echo "net10.0;net11.0"
 elif [ "${1:-}" = "test" ]; then
     printf '\033[32mTest run summary: Passed!\033[0m\n\033[0m  total: 3\n'
 
@@ -101,8 +103,10 @@ assert_no_command() {
 : > "$CALLS_FILE"
 run_runner --lane fast --no-build
 
-assert_contains "test --project tests/Graph.Core.Tests/Graph.Core.Tests.csproj"
-assert_contains "test --project tests/Graph.Analyzers.Tests/Graph.Analyzers.Tests.csproj"
+assert_contains "test --project tests/Graph.Core.Tests/Graph.Core.Tests.csproj --framework net10.0"
+assert_contains "test --project tests/Graph.Core.Tests/Graph.Core.Tests.csproj --framework net11.0"
+assert_contains "test --project tests/Graph.Analyzers.Tests/Graph.Analyzers.Tests.csproj --framework net10.0"
+assert_contains "test --project tests/Graph.Analyzers.Tests/Graph.Analyzers.Tests.csproj --framework net11.0"
 assert_not_contains "Graph.Age.Tests.csproj"
 assert_not_contains "Graph.Neo4j.Tests.csproj"
 assert_no_command "build"
@@ -111,11 +115,14 @@ assert_no_command "build"
 run_runner \
     --lane fast \
     --project Graph.Core.Tests \
+    --framework net11.0 \
     --filter '/*/*/GraphTests/*' \
     --filter '/*/*/SerializationTests/*'
 
 assert_contains "build tests/Graph.Core.Tests/Graph.Core.Tests.csproj --configuration Debug --verbosity normal"
 assert_contains "test --project tests/Graph.Core.Tests/Graph.Core.Tests.csproj"
+assert_contains "--framework net11.0"
+assert_not_contains "--framework net10.0"
 assert_contains "--filter-query /\*/\*/GraphTests/\* /\*/\*/SerializationTests/\*"
 assert_not_contains "Graph.Analyzers.Tests.csproj"
 assert_not_contains "cvoya-graph.sln"
@@ -129,9 +136,20 @@ run_runner \
     --report-trx \
     --results-directory TestResults
 
-assert_contains "--results-directory TestResults/graph-core-tests"
-assert_contains "--coverage --coverage-output graph-core-tests.cobertura.xml --coverage-output-format cobertura"
-assert_contains "--report-xunit-trx --report-xunit-trx-filename graph-core-tests.trx"
+for framework in net10.0 net11.0; do
+    assert_contains "--results-directory TestResults/graph-core-tests-$framework"
+    assert_contains "--coverage --coverage-output graph-core-tests-$framework.cobertura.xml --coverage-output-format cobertura"
+    assert_contains "--report-xunit-trx --report-xunit-trx-filename graph-core-tests-$framework.trx"
+done
+
+: > "$CALLS_FILE"
+if run_runner --lane fast --framework net9.0; then
+    echo "Expected an unsupported --framework value to be rejected." >&2
+    exit 1
+fi
+
+assert_no_command "build"
+assert_no_command "test"
 
 : > "$CALLS_FILE"
 if FAKE_FAIL_PROJECT=Graph.Analyzers.Tests run_runner --lane fast --no-build --keep-going; then
@@ -162,8 +180,8 @@ assert_no_command "test"
 run_runner --lane age --age-versions 1.7.0,1.8.0 --no-build
 
 age_runs=$(grep -c "test --project tests/Graph.Age.Tests/Graph.Age.Tests.csproj" "$CALLS_FILE")
-if [ "$age_runs" -ne 2 ]; then
-    echo "Expected the AGE project to run once per --age-versions entry (2 runs), got $age_runs." >&2
+if [ "$age_runs" -ne 4 ]; then
+    echo "Expected the AGE project to run on both frameworks per --age-versions entry (4 runs), got $age_runs." >&2
     cat "$CALLS_FILE" >&2
     exit 1
 fi
@@ -173,7 +191,8 @@ assert_not_contains "Graph.Core.Tests.csproj"
 : > "$CALLS_FILE"
 run_runner --lane age --age-versions 1.8.0 --no-build --report-trx --results-directory TestResults
 
-assert_contains "--results-directory TestResults/graph-age-tests-age-1-8-0"
+assert_contains "--results-directory TestResults/graph-age-tests-age-1-8-0-net10.0"
+assert_contains "--results-directory TestResults/graph-age-tests-age-1-8-0-net11.0"
 
 : > "$CALLS_FILE"
 if run_runner --lane age --age-versions not-a-version --no-build; then

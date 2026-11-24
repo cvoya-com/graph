@@ -595,7 +595,7 @@ The performance workflow runs:
 - Uses .NET 10 runtime for latest performance optimizations
 - Uses **Benchmark** configuration for optimal performance with project references
 - Benchmarks run on the host process runtime (.NET 10) for accurate performance measurement
-- CVOYA graph targets .NET 10 for production use
+- CVOYA Graph supports .NET 10 and .NET 11
 
 ## 📈 Interpreting Results
 
