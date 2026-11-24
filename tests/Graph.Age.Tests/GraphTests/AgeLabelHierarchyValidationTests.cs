@@ -20,7 +20,7 @@ public sealed class AgeLabelHierarchyValidationTests(AgeGraphCleanupFixture grap
     private const string RootLabel = "ValidationRoot";
 
     private static readonly string ConnectionString = Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
-        ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        ?? "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     [Node(RootLabel)]
     public record ValidationRoot : Node

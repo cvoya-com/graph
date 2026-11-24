@@ -46,7 +46,7 @@ Options:
   --results-directory <path>   Root directory for coverage and test reports
   --keep-going                  Run every selected project after a test failure
   --neo4j                       Start the local Neo4j container before tests
-  --age                         Start the local Apache AGE container(s) before tests
+  --age                         Start Apache AGE 1.8 locally, or the versions selected below
   --age-versions <csv>          Test the AGE lane once per AGE version (e.g. 1.7.0,1.8.0);
                                 1.7 uses port ${AGE_PORT:-5455}, 1.8 uses port ${AGE18_PORT:-5456}
                                 (override per version with AGE17_CONNECTION_STRING / AGE18_CONNECTION_STRING)
@@ -444,7 +444,7 @@ if [ "$START_AGE" = true ]; then
         ./scripts/containers/start-age.sh
     fi
     if [ "${#AGE_VERSIONS[@]}" -eq 0 ]; then
-        export AGE_CONNECTION_STRING="${AGE_CONNECTION_STRING:-Host=localhost;Port=${AGE_PORT:-5455};Username=postgres;Password=postgres;Database=postgres}"
+        export AGE_CONNECTION_STRING="${AGE_CONNECTION_STRING:-Host=localhost;Port=$(age_port_for_version 1.8.0);Username=postgres;Password=postgres;Database=postgres}"
     fi
 fi
 

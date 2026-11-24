@@ -29,7 +29,7 @@ public sealed class AgeDeclaredIndexContractTests(AgeGraphCleanupFixture graphCl
     private const string OrderingOnlyLabel = "Nul95OrderingOnly";
 
     private static readonly string ConnectionString = Environment.GetEnvironmentVariable("AGE_CONNECTION_STRING")
-        ?? "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres";
+        ?? "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres";
 
     static AgeDeclaredIndexContractTests()
     {

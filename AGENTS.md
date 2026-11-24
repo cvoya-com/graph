@@ -27,7 +27,7 @@ Use repeatable `--project` and `--filter` selectors while iterating, then run th
 The fast lane covers service-free core, analyzer, Cypher, translation, serialization/codegen, in-memory, and TCK meta-tests. The full lane also requires:
 
 - Neo4j at `NEO4J_URI` or `bolt://localhost:7687` with `neo4j/password`; start it with `scripts/containers/start-neo4j.sh`.
-- AGE at `AGE_CONNECTION_STRING`; start it with `scripts/containers/start-age.sh`.
+- AGE at `AGE_CONNECTION_STRING`. Start the default AGE 1.8 fixture with `scripts/containers/start-age.sh`.
 
 `src/Graph.CompatibilityTests` defines contracts but executes almost no tests by itself; provider projects bind and run them. Benchmarks are outside the normal gate. See [provider implementers](docs/provider-implementers-guide.md) for the capability and certification model.
 

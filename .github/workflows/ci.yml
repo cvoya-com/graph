@@ -149,7 +149,7 @@ jobs:
           --health-timeout 5s
           --health-retries 30
       age:
-        image: apache/age:release_PG18_1.7.0
+        image: apache/age:release_PG18_1.8.0
         ports:
           - 5432:5432
         env:

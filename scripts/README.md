@@ -75,7 +75,7 @@ dotnet pack src/Graph/Graph.csproj --configuration Release
 # Run tests with coverage
 ./scripts/run-tests.sh --fast --coverage
 
-# Start both provider services and run all tests
+# Start Neo4j and AGE 1.8.0, then run all tests
 ./scripts/run-tests.sh --lane all --neo4j --age
 
 # Run the AGE suite against both released AGE versions (1.7.0 on port 5455, 1.8.0 on port 5456)

@@ -73,12 +73,14 @@ Neo4j defaults to `bolt://localhost:7687` with `neo4j/password`. Override with `
 The script prefers Podman and falls back to Docker. Set `CONTAINER_RUNTIME=podman` or
 `CONTAINER_RUNTIME=docker` to force one.
 
-AGE uses `AGE_CONNECTION_STRING`; the default repository container listens on port 5455:
+AGE uses `AGE_CONNECTION_STRING`. The default repository container runs AGE 1.8.0 on port 5456.
 
 ```bash
 ./scripts/containers/start-age.sh
-export AGE_CONNECTION_STRING='Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres'
+export AGE_CONNECTION_STRING='Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres'
 ```
+
+Use `./scripts/containers/start-age.sh 1.7` to start the AGE 1.7.0 compatibility fixture on port 5455.
 
 Setting `CI=true` locally does not start either service.
 

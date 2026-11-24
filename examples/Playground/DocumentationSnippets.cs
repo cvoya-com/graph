@@ -132,7 +132,7 @@ internal static class DocumentationSnippets
     {
         // snippet-start: age-quick-start
         await using var store = new AgeGraphStore(
-            "Host=localhost;Port=5455;Username=postgres;Password=postgres;Database=postgres",
+            "Host=localhost;Port=5456;Username=postgres;Password=postgres;Database=postgres",
             graphName: "my_graph");
 
         await store.CreateGraphIfNotExistsAsync();

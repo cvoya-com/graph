@@ -13,8 +13,12 @@ cleanup() {
 
 trap cleanup EXIT
 
+unset AGE_CONNECTION_STRING AGE17_CONNECTION_STRING AGE18_CONNECTION_STRING
+unset AGE_PORT AGE_CONTAINER_NAME AGE_CONTAINER_IMAGE AGE18_PORT AGE18_CONTAINER_NAME AGE18_CONTAINER_IMAGE
+
 mkdir -p \
     "$FAKE_BIN" \
+    "$TEST_ROOT/scripts/containers" \
     "$TEST_ROOT/tests/Graph.Core.Tests" \
     "$TEST_ROOT/tests/Graph.Analyzers.Tests" \
     "$TEST_ROOT/tests/Graph.Neo4j.Tests" \
@@ -34,6 +38,19 @@ touch \
     "$TEST_ROOT/tests/Graph.Neo4j.Performance.Tests/Graph.Neo4j.Performance.Tests.csproj"
 
 cp "$REPOSITORY_ROOT/scripts/run-tests.sh" "$TEST_ROOT/scripts-run-tests.sh"
+cp "$REPOSITORY_ROOT/scripts/containers/start-age.sh" "$TEST_ROOT/scripts/containers/start-age.sh"
+
+cat > "$FAKE_BIN/docker" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+if [ "$1" = "run" ]; then
+    printf 'container' >> "$CALLS_FILE"
+    printf ' %q' "$@" >> "$CALLS_FILE"
+    printf '\n' >> "$CALLS_FILE"
+fi
+EOF
+chmod +x "$FAKE_BIN/docker"
 
 cat > "$FAKE_BIN/dotnet" <<'EOF'
 #!/bin/bash
@@ -47,6 +64,9 @@ if [ "${1:-}" = "--version" ]; then
 elif [ "${1:-}" = "msbuild" ]; then
     echo "net10.0;net11.0"
 elif [ "${1:-}" = "test" ]; then
+    if [[ "${AGE_CONNECTION_STRING:-}" =~ (^|\;)Port=([0-9]+)(\;|$) ]]; then
+        printf 'age port %s\n' "${BASH_REMATCH[2]}" >> "$CALLS_FILE"
+    fi
     printf '\033[32mTest run summary: Passed!\033[0m\n\033[0m  total: 3\n'
 
     if [ -n "${FAKE_FAIL_PROJECT:-}" ]; then
@@ -64,7 +84,7 @@ run_runner() {
     (
         cd "$TEST_ROOT"
         PATH="$FAKE_BIN:$PATH" \
-            CALLS_FILE="$CALLS_FILE" \
+            CALLS_FILE="$CALLS_FILE" CONTAINER_RUNTIME=docker \
             FAKE_FAIL_PROJECT="${FAKE_FAIL_PROJECT:-}" \
             ./scripts-run-tests.sh "$@"
     )
@@ -177,7 +197,28 @@ assert_no_command "build"
 assert_no_command "test"
 
 : > "$CALLS_FILE"
-run_runner --lane age --age-versions 1.7.0,1.8.0 --no-build
+run_runner --lane age --age --no-build
+
+assert_contains "container run --detach --name cvoya-age18 --publish 5456:5432"
+assert_contains "apache/age:release_PG18_1.8.0"
+assert_contains "age port 5456"
+assert_not_contains "apache/age:release_PG18_1.7.0"
+
+: > "$CALLS_FILE"
+AGE18_PORT=55456 run_runner --lane age --age --no-build
+
+assert_contains "container run --detach --name cvoya-age18 --publish 55456:5432"
+assert_contains "age port 55456"
+
+: > "$CALLS_FILE"
+run_runner --lane age --age --age-versions 1.7.0,1.8.0 --no-build
+
+assert_contains "container run --detach --name cvoya-age --publish 5455:5432"
+assert_contains "apache/age:release_PG18_1.7.0"
+assert_contains "container run --detach --name cvoya-age18 --publish 5456:5432"
+assert_contains "apache/age:release_PG18_1.8.0"
+assert_contains "age port 5455"
+assert_contains "age port 5456"
 
 age_runs=$(grep -c "test --project tests/Graph.Age.Tests/Graph.Age.Tests.csproj" "$CALLS_FILE")
 if [ "$age_runs" -ne 4 ]; then
